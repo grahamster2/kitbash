@@ -283,8 +283,11 @@ server.registerTool(
       "every part addressable, so a part can be regenerated on its own later " +
       "without rerolling the whole object.\n\n" +
       "Positions are in the parts' own units — call describe_part first to " +
-      "get real dimensions. Rotations are XYZ euler degrees, applied after " +
-      "scale and before translation.",
+      "get real dimensions rather than guessing. Rotations are XYZ euler " +
+      "degrees, applied after scale and before translation.\n\n" +
+      "Coordinates are glTF convention: +Y is UP, +X right, +Z toward the " +
+      "viewer. Blender and Roblox are Z-up and will convert on import, so a " +
+      "part placed at y=2 here appears at z=2 there. Stack parts along Y.",
     inputSchema: {
       parts: z
         .array(
