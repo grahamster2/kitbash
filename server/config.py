@@ -27,6 +27,49 @@ DEFAULT_GUIDANCE_SCALE = float(os.environ.get("KITBASH_GUIDANCE_SCALE", "5.0"))
 # Set to 0 when a second model needs the VRAM.
 KEEP_MODEL_RESIDENT = os.environ.get("KITBASH_KEEP_RESIDENT", "1") != "0"
 
+# Which generator POST /jobs uses when the caller does not say. Hunyuan3D stays
+# the default: docs/QUALITY-COMPARISON.md found it ~2x faster in wall time and
+# tolerant of unprepared input, where TRELLIS 2 needs an alpha matte to behave.
+DEFAULT_GENERATOR = os.environ.get("KITBASH_DEFAULT_GENERATOR", "hunyuan3d")
+
+# --- TRELLIS 2 --------------------------------------------------------------
+# TRELLIS 2 runs out-of-process because its pins (torch 2.8, transformers 5.2.0)
+# cannot coexist with this server's (torch 2.11, transformers 5.14.1). These
+# point at the separate install; see docs/TRELLIS2-EVAL.md.
+TRELLIS_PYTHON = Path(
+    os.environ.get("KITBASH_TRELLIS_PYTHON", r"D:\trellis2\venv\Scripts\python.exe")
+)
+TRELLIS_WORKER = Path(
+    os.environ.get("KITBASH_TRELLIS_WORKER", r"D:\trellis2\trellis_worker.py")
+)
+# The node pack is only importable with ComfyUI's root on sys.path and as cwd.
+TRELLIS_COMFY = Path(
+    os.environ.get("KITBASH_TRELLIS_COMFY", r"D:\trellis2\ComfyUI")
+)
+# The worker fetches DINOv3 through huggingface_hub; without this it would
+# populate C: instead of the drive the 19 GB of weights already live on.
+TRELLIS_HF_HOME = os.environ.get("KITBASH_TRELLIS_HF_HOME", r"D:\hf-cache")
+
+# Q6_K is Q4 speed at closer-to-Q8 fidelity for the same VRAM — quantization is
+# a disk/speed knob here, not a VRAM one, because the three DiTs load serially.
+TRELLIS_QUANT = os.environ.get("KITBASH_TRELLIS_QUANT", "GGUF Q6_K")
+
+# 512 + 2048, NOT the eval's 1024_cascade + 4096. docs/QUALITY-COMPARISON.md ran
+# the recommended settings on a solid crate and killed it at 21 minutes, pinned
+# at 96% of the VRAM budget: TRELLIS 2's cost scales with occupied volume, and
+# Kitbash's props are solid where the eval's dragon was mostly empty space.
+TRELLIS_PIPELINE_TYPE = os.environ.get("KITBASH_TRELLIS_PIPELINE", "512")
+TRELLIS_TEXTURE_SIZE = int(os.environ.get("KITBASH_TRELLIS_TEXTURE_SIZE", "2048"))
+TRELLIS_STEPS = int(os.environ.get("KITBASH_TRELLIS_STEPS", "12"))
+
+# target_face_num is a node input, so decimation happens in-pipeline rather than
+# as a post-step. Matches the Roblox per-MeshPart cap.
+TRELLIS_TARGET_FACES = int(os.environ.get("KITBASH_TRELLIS_TARGET_FACES", "20000"))
+
+# A completing run is 79-151s. This is not a performance budget, it is the
+# tripwire for the memory-thrash stall above, which never terminates on its own.
+TRELLIS_TIMEOUT = int(os.environ.get("KITBASH_TRELLIS_TIMEOUT", "900"))
+
 # How many finished jobs to retain in memory before evicting the oldest.
 MAX_JOB_HISTORY = int(os.environ.get("KITBASH_MAX_JOB_HISTORY", "200"))
 

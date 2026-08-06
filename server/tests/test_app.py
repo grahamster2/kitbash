@@ -39,6 +39,63 @@ def test_post_jobs_defaults_to_no_params(client):
     assert body["params"] == {}
 
 
+def test_post_jobs_takes_a_generator_and_a_textured_flag(client):
+    body = client.post(
+        "/jobs", json={"image_b64": PNG_B64, "generator": "trellis2", "textured": False}
+    ).json()
+
+    assert body["params"] == {"generator": "trellis2", "textured": False}
+
+
+def test_post_jobs_rejects_an_unknown_generator(client):
+    """Caught at the call that made the typo rather than by the worker two
+    minutes into a queue."""
+    response = client.post(
+        "/jobs", json={"image_b64": PNG_B64, "generator": "trellis3"}
+    )
+
+    assert response.status_code == 400
+    assert "trellis3" in response.json()["detail"]
+
+
+def test_a_job_records_which_generator_built_it(client, finished_job):
+    for name in ("hunyuan3d", "trellis2"):
+        job_id = finished_job(generator=name)
+
+        assert client.get(f"/jobs/{job_id}").json()["result"]["generator"] == name
+
+
+def test_generators_lists_both_with_their_measured_costs(client):
+    body = client.get("/generators").json()
+
+    assert body["default"] == "hunyuan3d"
+    by_name = {g["name"]: g for g in body["generators"]}
+    assert set(by_name) == {"hunyuan3d", "trellis2"}
+    assert by_name["hunyuan3d"]["textures"] is False
+    assert by_name["trellis2"]["textures"] is True
+    # The recommended-but-unusable settings must not be advertised as defaults.
+    assert by_name["trellis2"]["defaults"]["pipeline_type"] == "512"
+    assert by_name["trellis2"]["defaults"]["texture_size"] == 2048
+    assert all("peak_vram_gib" in g["characteristics"] for g in body["generators"])
+
+
+def test_generators_reports_trellis_as_unavailable_without_its_install(client):
+    """Hunyuan3D is in-process, so it ships with the server; TRELLIS 2 is a
+    separate 28 GB install that a given box may simply not have."""
+    body = client.get("/generators").json()
+    trellis2 = next(g for g in body["generators"] if g["name"] == "trellis2")
+
+    assert trellis2["available"] is False
+    assert trellis2["missing"]
+    assert trellis2["in_process"] is False
+
+
+def test_health_reports_residency_per_generator(client):
+    body = client.get("/health").json()
+
+    assert body["generators_loaded"] == {"hunyuan3d": False, "trellis2": False}
+
+
 def test_post_jobs_requires_an_image(client):
     response = client.post("/jobs", json={"part_name": "hull"})
 
@@ -408,7 +465,11 @@ def test_scene_ids_cannot_climb_out_of_the_output_directory(client, tmp_path):
 def test_unload_reports_the_model_is_gone(client):
     body = client.post("/admin/unload").json()
 
-    assert body == {"model_loaded": False, "gpu": None}
+    assert body == {
+        "model_loaded": False,
+        "generators_loaded": {"hunyuan3d": False, "trellis2": False},
+        "gpu": None,
+    }
 
 
 def test_startup_creates_the_output_directory_and_rehydrates(monkeypatch, tmp_path):

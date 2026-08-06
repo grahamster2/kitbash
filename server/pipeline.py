@@ -150,6 +150,9 @@ def generate_shape(image_b64: str, out_dir: Path, params: dict) -> dict:
         "decimated_from": decimated_from,
         "watertight": bool(mesh.is_watertight),
         "file_bytes": mesh_path.stat().st_size,
+        # Recorded now that there are two: a finished job should say what built
+        # it without the caller having to remember what it asked for.
+        "generator": "hunyuan3d",
         "params": {
             "octree_resolution": octree,
             "num_inference_steps": steps,

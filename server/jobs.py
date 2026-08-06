@@ -19,10 +19,16 @@ from pathlib import Path
 
 import config
 import pipeline
+import trellis
 
 log = logging.getLogger("kitbash.jobs")
 
 QUEUED, RUNNING, DONE, ERROR = "queued", "running", "done", "error"
+
+# Name -> the module that owns the model. Both expose generate_shape with the
+# same signature and result keys, which is the entire interface; the modules are
+# stored rather than the functions so a test can monkeypatch generate_shape.
+GENERATORS = {"hunyuan3d": pipeline, "trellis2": trellis}
 
 _jobs: "OrderedDict[str, dict]" = OrderedDict()
 # Input images are kept out of the job record so they never reach job.json or an
@@ -132,7 +138,12 @@ def _run_one(job_id: str):
         if not image_b64:
             raise ValueError("image_to_3d requires an image")
 
-        result = pipeline.generate_shape(image_b64, _job_dir(job_id), job["params"])
+        name = job["params"].get("generator", config.DEFAULT_GENERATOR)
+        generator = GENERATORS.get(name)
+        if generator is None:
+            raise ValueError(f"unknown generator: {name}")
+
+        result = generator.generate_shape(image_b64, _job_dir(job_id), job["params"])
         _set(job_id, status=DONE, finished_at=time.time(), result=result)
         log.info("job %s done in %ss", job_id, result["generation_seconds"])
     except Exception as exc:

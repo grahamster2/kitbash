@@ -24,6 +24,7 @@ import jobs
 import materials
 import pipeline
 import primitives
+import trellis
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,6 +50,22 @@ class GenerateRequest(BaseModel):
     image_b64: str | None = Field(
         None, description="PNG/JPEG as base64, data URLs accepted"
     )
+    generator: str | None = Field(
+        None,
+        description=(
+            f"Which model builds the shape; see GET /generators. One of "
+            f"{sorted(jobs.GENERATORS)}, default {config.DEFAULT_GENERATOR!r}."
+        ),
+    )
+    textured: bool | None = Field(
+        None,
+        description=(
+            "Bake a base-colour and metallic-roughness atlas. TRELLIS 2 only — "
+            "Hunyuan3D's texture stage does not fit on the reference card. "
+            "Defaults on for TRELLIS 2; turn it off to skip the ~50s bake when "
+            "only geometry is wanted."
+        ),
+    )
     # Reuse an image from POST /images. The same reference driving several parts
     # is what makes an assembled object look like one object rather than a pile
     # of separately-imagined pieces.
@@ -71,9 +88,71 @@ def health():
     return {
         "status": "ok",
         "uptime_seconds": round(time.time() - STARTED_AT, 1),
-        "model_loaded": pipeline.model_loaded(),
+        # Stays a plain bool for the MCP and Tauri clients, but now means "some
+        # generator is holding VRAM" rather than specifically Hunyuan3D.
+        "model_loaded": pipeline.model_loaded() or trellis.model_loaded(),
+        "generators_loaded": {
+            "hunyuan3d": pipeline.model_loaded(),
+            "trellis2": trellis.model_loaded(),
+        },
         "gpu": pipeline.vram_stats(),
         **jobs.stats(),
+    }
+
+
+@api.get("/generators")
+def list_generators():
+    """The shape models available here and what they actually cost.
+
+    The numbers are measured (docs/QUALITY-COMPARISON.md), not quoted from the
+    upstream READMEs, and they include the failure modes — an agent choosing a
+    generator needs to know TRELLIS 2's baked colour came back as noise on this
+    project's own reference style far more than it needs a feature list.
+    """
+    return {
+        "default": config.DEFAULT_GENERATOR,
+        "generators": [
+            {
+                "name": "hunyuan3d",
+                "available": True,
+                "loaded": pipeline.model_loaded(),
+                "textures": False,
+                "in_process": True,
+                "characteristics": {
+                    "shape": "softer than TRELLIS 2 on hard surfaces — edges "
+                             "round off and large panels undulate — but robust "
+                             "to unprepared input and reliable",
+                    "texture": "none. The texture stage needs 12-16 GiB and "
+                               "does not fit on the reference card",
+                    "wall_seconds": "~41 warm, ~83 including a cold load",
+                    "peak_vram_gib": "9.3 device-wide, 92% of the usable budget",
+                    "needs_alpha": "no",
+                },
+                "defaults": {
+                    "octree_resolution": config.DEFAULT_OCTREE_RESOLUTION,
+                    "num_inference_steps": config.DEFAULT_INFERENCE_STEPS,
+                    "guidance_scale": config.DEFAULT_GUIDANCE_SCALE,
+                },
+            },
+            {
+                "name": "trellis2",
+                **trellis.available(),
+                "loaded": trellis.model_loaded(),
+                "textures": True,
+                # Worth advertising: it explains the ~10s constant overhead and
+                # why this generator cannot be kept warm between jobs.
+                "in_process": False,
+                "characteristics": trellis.CHARACTERISTICS,
+                "defaults": {
+                    "quant": config.TRELLIS_QUANT,
+                    "pipeline_type": config.TRELLIS_PIPELINE_TYPE,
+                    "texture_size": config.TRELLIS_TEXTURE_SIZE,
+                    "num_inference_steps": config.TRELLIS_STEPS,
+                    "target_faces": config.TRELLIS_TARGET_FACES,
+                    "textured": True,
+                },
+            },
+        ],
     }
 
 
@@ -88,11 +167,20 @@ def create_job(req: GenerateRequest):
             "seed": req.seed,
             "target_faces": req.target_faces,
             "part_name": req.part_name,
+            "generator": req.generator,
+            "textured": req.textured,
         }.items()
         if v is not None
     }
     if bool(req.image_b64) == bool(req.image_id):
         raise HTTPException(400, "give exactly one of image_b64 or image_id")
+    if req.generator is not None and req.generator not in jobs.GENERATORS:
+        # Rejected here rather than in the worker: a queued job that is going to
+        # fail on a typo should fail at the call that made the typo.
+        raise HTTPException(
+            400, f"unknown generator {req.generator!r}, expected one of "
+                 f"{sorted(jobs.GENERATORS)}"
+        )
 
     image_b64 = req.image_b64
     if req.image_id:
@@ -453,6 +541,21 @@ def get_exported_file(path: str):
 
 @api.post("/admin/unload")
 def unload_model():
-    """Drop the model from VRAM. Needed before running anything else on the GPU."""
-    pipeline.unload()
-    return {"model_loaded": pipeline.model_loaded(), "gpu": pipeline.vram_stats()}
+    """Drop every generator's model from VRAM.
+
+    Unconditionally both, because the caller's actual intent is "give me the
+    card back" and it should not have to know which model happens to be
+    resident. Generators also do this to each other at the start of a job —
+    7.63 + 6.88 GiB does not fit in 8.88 — so this endpoint is for handing the
+    GPU to something outside the server.
+    """
+    for generator in jobs.GENERATORS.values():
+        generator.unload()
+    return {
+        "model_loaded": pipeline.model_loaded() or trellis.model_loaded(),
+        "generators_loaded": {
+            name: generator.model_loaded()
+            for name, generator in jobs.GENERATORS.items()
+        },
+        "gpu": pipeline.vram_stats(),
+    }

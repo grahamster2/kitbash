@@ -140,6 +140,39 @@ def test_run_one_records_the_exception_type_and_message_on_failure(monkeypatch):
     assert job["id"] not in jobs._images
 
 
+def test_run_one_defaults_to_the_configured_generator():
+    job = jobs.submit("image_to_3d", {}, IMAGE)
+
+    jobs._run_one(job["id"])
+
+    assert jobs.get(job["id"])["result"]["generator"] == config.DEFAULT_GENERATOR
+
+
+def test_run_one_dispatches_to_the_generator_the_params_name():
+    job = jobs.submit("image_to_3d", {"generator": "trellis2"}, IMAGE)
+
+    jobs._run_one(job["id"])
+
+    assert jobs.get(job["id"])["result"]["generator"] == "trellis2"
+
+
+def test_run_one_rejects_an_unknown_generator():
+    job = jobs.submit("image_to_3d", {"generator": "trellis3"}, IMAGE)
+
+    jobs._run_one(job["id"])
+
+    assert jobs.get(job["id"])["error"] == "ValueError: unknown generator: trellis3"
+
+
+def test_both_generators_expose_the_same_interface():
+    """The dispatch table is the whole abstraction; there is no base class to
+    make this true, so it is asserted instead."""
+    for module in jobs.GENERATORS.values():
+        assert callable(module.generate_shape)
+        assert callable(module.unload)
+        assert module.model_loaded() is False
+
+
 def test_run_one_rejects_an_unknown_job_type():
     job = jobs.submit("text_to_3d", {}, IMAGE)
 

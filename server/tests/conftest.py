@@ -34,6 +34,7 @@ os.environ.setdefault(
 import config  # noqa: E402
 import jobs  # noqa: E402
 import pipeline  # noqa: E402
+import trellis  # noqa: E402
 
 # A real 1x1 PNG. Nothing decodes it — generation is stubbed — but request
 # bodies here should still look like the ones a client sends.
@@ -64,8 +65,7 @@ def out_dir(tmp_path, monkeypatch):
     return d
 
 
-@pytest.fixture(autouse=True)
-def stub_generate(monkeypatch):
+def _stub_generate_shape(name: str):
     """Stand in for the one function that needs a GPU.
 
     Writes a real box mesh, so everything downstream of generation — describe,
@@ -88,11 +88,20 @@ def stub_generate(monkeypatch):
             "decimated_from": None,
             "watertight": True,
             "file_bytes": mesh_path.stat().st_size,
+            "generator": name,
             "params": dict(params),
         }
 
-    monkeypatch.setattr(pipeline, "generate_shape", fake_generate_shape)
     return fake_generate_shape
+
+
+@pytest.fixture(autouse=True)
+def stub_generate(monkeypatch):
+    """Fake both generators, so no test can reach CUDA or the TRELLIS subprocess."""
+    hunyuan = _stub_generate_shape("hunyuan3d")
+    monkeypatch.setattr(pipeline, "generate_shape", hunyuan)
+    monkeypatch.setattr(trellis, "generate_shape", _stub_generate_shape("trellis2"))
+    return hunyuan
 
 
 @pytest.fixture
