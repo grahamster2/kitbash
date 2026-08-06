@@ -121,6 +121,7 @@ export interface PartPlacement {
   rotation?: number[];
   scale?: number | number[];
   material?: string;
+  color?: string;
   use_raw?: boolean;
 }
 

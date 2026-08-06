@@ -85,7 +85,9 @@ def assemble(parts: list[dict], out_path: Path, apply_materials: bool = True) ->
 
         material = None
         if apply_materials:
-            material = materials.apply_to_mesh(mesh, name, part.get("material"))
+            material = materials.apply_to_mesh(
+                mesh, name, part.get("material"), part.get("color")
+            )
 
         T = _transform(part.get("position"), part.get("rotation"), part.get("scale"))
         scene.add_geometry(mesh, node_name=name, geom_name=name, transform=T)

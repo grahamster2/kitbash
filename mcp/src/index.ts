@@ -319,6 +319,15 @@ server.registerTool(
                   "metal, dark_metal, glass, rubber, wood, stone, fabric, " +
                   "leather, paint, plastic, gold, emissive.",
               ),
+            color: z
+              .string()
+              .optional()
+              .describe(
+                'Base colour as "#rrggbb". Materials are neutral by default ' +
+                  "because the generator does not know what colour the object " +
+                  "is — set this when you do. Keeps the family's metallic and " +
+                  "roughness, so a red car body still behaves like paint.",
+              ),
             use_raw: z
               .boolean()
               .optional()

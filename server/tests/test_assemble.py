@@ -4,6 +4,7 @@ import pytest
 import trimesh
 
 import assemble
+import materials
 
 
 def apply_to(T, point):
@@ -212,6 +213,53 @@ def test_assemble_can_skip_materials(make_mesh, tmp_path):
     )
 
     assert result["parts"][0]["material"] is None
+
+
+def test_the_default_material_is_neutral(make_mesh, tmp_path):
+    """paint is both the body-panel material and the fallback, so a saturated
+    default would turn most scenes an arbitrary colour."""
+    r, g, b, _ = materials.PALETTE[materials.DEFAULT_MATERIAL]["baseColorFactor"]
+
+    assert max(r, g, b) - min(r, g, b) < 0.1
+
+
+@pytest.mark.parametrize(
+    "value, expected_rgb",
+    [
+        ("#ffffff", [1.0, 1.0, 1.0]),
+        ("#000000", [0.0, 0.0, 0.0]),
+        ("ff0000", [1.0, 0.0, 0.0]),  # bare hex, no leading '#'
+    ],
+)
+def test_parse_color_converts_srgb_to_linear(value, expected_rgb):
+    assert materials.parse_color(value)[:3] == pytest.approx(expected_rgb, abs=1e-6)
+
+
+def test_parse_color_is_not_a_plain_divide_by_255():
+    """glTF baseColorFactor is linear; treating sRGB as linear comes out bright."""
+    assert materials.parse_color("#808080")[0] < 0.5
+
+
+def test_parse_color_reads_alpha():
+    assert materials.parse_color("#ffffff80")[3] == pytest.approx(128 / 255)
+
+
+@pytest.mark.parametrize("bad", ["#fff", "#gggggg", "nope"])
+def test_parse_color_rejects_malformed_input(bad):
+    with pytest.raises(ValueError):
+        materials.parse_color(bad)
+
+
+def test_an_explicit_color_keeps_the_material_family(make_mesh, tmp_path):
+    path = make_mesh(trimesh.creation.box())
+
+    result = assemble.assemble(
+        [{"name": "hull", "mesh_path": str(path), "color": "#c41e1a"}],
+        tmp_path / "scene.glb",
+    )
+
+    # Still paint — colour overrides the base colour, not the metallic/roughness.
+    assert result["parts"][0]["material"] == "paint"
 
 
 def test_assemble_rejects_an_unknown_material(make_mesh, tmp_path):

@@ -126,6 +126,9 @@ class PartPlacement(BaseModel):
             f"One of {materials.families()}."
         ),
     )
+    color: str | None = Field(
+        None, description='Base colour as "#rrggbb". Keeps the material family.'
+    )
     # Assemble from the dense original instead of the decimated export. Useful
     # when one part needs detail the rest of the scene does not.
     use_raw: bool = False
@@ -176,6 +179,7 @@ def assemble_scene(req: AssembleRequest):
             "rotation": p.rotation,
             "scale": p.scale,
             "material": p.material,
+            "color": p.color,
         }
         for p in req.parts
     ]

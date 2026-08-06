@@ -30,7 +30,11 @@ PALETTE: dict[str, dict] = {
     "stone":   dict(baseColorFactor=[0.48, 0.47, 0.44, 1.0], metallicFactor=0.0, roughnessFactor=0.88),
     "fabric":  dict(baseColorFactor=[0.35, 0.33, 0.40, 1.0], metallicFactor=0.0, roughnessFactor=0.95),
     "leather": dict(baseColorFactor=[0.33, 0.20, 0.13, 1.0], metallicFactor=0.0, roughnessFactor=0.65),
-    "paint":   dict(baseColorFactor=[0.75, 0.16, 0.14, 1.0], metallicFactor=0.10, roughnessFactor=0.45),
+    # Neutral on purpose. "paint" is both the body-panel material and the
+    # fallback for anything unrecognised, so a saturated colour here would turn
+    # most scenes an arbitrary red. We do not know what colour the thing is —
+    # pass `color` when you do.
+    "paint":   dict(baseColorFactor=[0.82, 0.82, 0.84, 1.0], metallicFactor=0.10, roughnessFactor=0.45),
     "plastic": dict(baseColorFactor=[0.85, 0.85, 0.87, 1.0], metallicFactor=0.0, roughnessFactor=0.40),
     "gold":    dict(baseColorFactor=[0.85, 0.68, 0.25, 1.0], metallicFactor=1.0, roughnessFactor=0.30),
     "emissive": dict(baseColorFactor=[0.95, 0.85, 0.55, 1.0], metallicFactor=0.0, roughnessFactor=0.20,
@@ -85,9 +89,40 @@ def resolve(part_name: str, explicit: str | None = None) -> tuple[str, dict]:
     return family, PALETTE[family]
 
 
-def apply_to_mesh(mesh, part_name: str, explicit: str | None = None) -> str:
-    """Attach a PBR material to one mesh. Returns the family chosen."""
+def parse_color(value: str) -> list[float]:
+    """"#rrggbb" or "#rrggbbaa" -> linear-ish float RGBA.
+
+    glTF baseColorFactor is linear, while a hex colour anyone types is sRGB, so
+    the channels are converted rather than divided by 255 — skipping that makes
+    every colour come out visibly too bright.
+    """
+    h = value.strip().lstrip("#")
+    if len(h) not in (6, 8):
+        raise ValueError(f"colour must be #rrggbb or #rrggbbaa, got {value!r}")
+    try:
+        channels = [int(h[i:i + 2], 16) / 255 for i in range(0, len(h), 2)]
+    except ValueError:
+        raise ValueError(f"colour is not valid hex: {value!r}") from None
+
+    def to_linear(c: float) -> float:
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+    rgba = [to_linear(c) for c in channels[:3]]
+    rgba.append(channels[3] if len(channels) == 4 else 1.0)  # alpha stays linear
+    return rgba
+
+
+def apply_to_mesh(
+    mesh, part_name: str, explicit: str | None = None, color: str | None = None
+) -> str:
+    """Attach a PBR material to one mesh. Returns the family chosen.
+
+    `color` overrides only the base colour, keeping the family's metallic and
+    roughness — a red car body should still behave like paint.
+    """
     family, spec = resolve(part_name, explicit)
+    if color:
+        spec = {**spec, "baseColorFactor": parse_color(color)}
     mesh.visual = trimesh.visual.TextureVisuals(
         material=PBRMaterial(name=f"kitbash_{family}", **spec)
     )
