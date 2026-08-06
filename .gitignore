@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+dist-ssr/
+*.local
+.npm/
+
+# Rust / Tauri
+target/
+app/src-tauri/target/
+app/src-tauri/gen/
+
+# Models and generated assets — never commit these
+models/
+weights/
+checkpoints/
+*.safetensors
+*.ckpt
+*.pth
+*.bin
+outputs/
+generated/
+*.glb
+*.gltf
+*.fbx
+*.obj
+*.ply
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Logs
+*.log
+logs/
