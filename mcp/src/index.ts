@@ -90,6 +90,17 @@ server.registerTool(
         .int()
         .optional()
         .describe("Fixed seed. Use the same seed across parts for consistency."),
+      target_faces: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          "Decimate the mesh to roughly this many faces before saving. Raw " +
+            "output is 300k+ faces, which no game engine will accept — set " +
+            "this for anything headed into Roblox or Unity. 5000-20000 is a " +
+            "sensible range for a single prop. The dense original is kept " +
+            "server-side either way.",
+        ),
       octree_resolution: z
         .number()
         .int()
@@ -125,6 +136,7 @@ server.registerTool(
         image_b64: imageB64,
         part_name: args.part_name,
         seed: args.seed,
+        target_faces: args.target_faces,
         octree_resolution: args.octree_resolution,
         num_inference_steps: args.num_inference_steps,
       });
@@ -177,12 +189,13 @@ server.registerTool(
         output_path: out,
         faces: r.faces,
         vertices: r.vertices,
+        decimated_from: r.decimated_from,
         watertight: r.watertight,
         generation_seconds: r.generation_seconds,
         seed: r.params.seed ?? null,
         note:
           r.faces > 50_000
-            ? `${r.faces} faces is very dense for a game engine — plan on decimating before import.`
+            ? `${r.faces} faces is very dense for a game engine — pass target_faces to decimate.`
             : undefined,
       });
     } catch (err) {

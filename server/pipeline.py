@@ -121,9 +121,21 @@ def generate_shape(image_b64: str, out_dir: Path, params: dict) -> dict:
     t0 = time.time()
     mesh = pipe(**kwargs)[0]
     elapsed = time.time() - t0
+    peak_vram = torch.cuda.max_memory_allocated() / 1024**3
 
     out_dir.mkdir(parents=True, exist_ok=True)
     mesh_path = out_dir / "mesh.glb"
+    raw_faces = int(len(mesh.faces))
+    decimated_from = None
+
+    target_faces = params.get("target_faces")
+    if target_faces and raw_faces > int(target_faces):
+        # Keep the dense original: it is the better input for retopology or a
+        # higher-quality re-export later, and regenerating it costs 40s.
+        mesh.export(str(out_dir / "mesh_raw.glb"))
+        mesh = _decimate(mesh, int(target_faces))
+        decimated_from = raw_faces
+
     mesh.export(str(mesh_path))
 
     if not config.KEEP_MODEL_RESIDENT:
@@ -132,9 +144,10 @@ def generate_shape(image_b64: str, out_dir: Path, params: dict) -> dict:
     return {
         "mesh_path": str(mesh_path),
         "generation_seconds": round(elapsed, 1),
-        "peak_vram_gib": round(torch.cuda.max_memory_allocated() / 1024**3, 2),
+        "peak_vram_gib": round(peak_vram, 2),
         "vertices": int(len(mesh.vertices)),
         "faces": int(len(mesh.faces)),
+        "decimated_from": decimated_from,
         "watertight": bool(mesh.is_watertight),
         "file_bytes": mesh_path.stat().st_size,
         "params": {
@@ -142,5 +155,23 @@ def generate_shape(image_b64: str, out_dir: Path, params: dict) -> dict:
             "num_inference_steps": steps,
             "guidance_scale": guidance,
             "seed": seed,
+            "target_faces": target_faces,
         },
     }
+
+
+def _decimate(mesh, target_faces: int):
+    """Quadric decimation down to target_faces.
+
+    Uses trimesh + fast_simplification, both MIT. pymeshlab would also do this
+    and is already installed, but it is GPL — keeping it off the server's
+    import path keeps the whole stack permissively licensed.
+
+    Decimation usually breaks watertightness. That is fine for a game engine,
+    which does not care, but it is why the raw mesh is kept alongside.
+    """
+    log.info("decimating %d -> %d faces", len(mesh.faces), target_faces)
+    t0 = time.time()
+    out = mesh.simplify_quadric_decimation(face_count=target_faces)
+    log.info("decimated to %d faces in %.2fs", len(out.faces), time.time() - t0)
+    return out

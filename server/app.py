@@ -41,6 +41,9 @@ class GenerateRequest(BaseModel):
     num_inference_steps: int | None = None
     guidance_scale: float | None = None
     seed: int | None = None
+    # Raw meshes come out at 300k+ faces, far too heavy for a game engine.
+    # Decimation is cheap (~0.3s) and happens before export.
+    target_faces: int | None = None
     # Free-form label so a caller can tag which part of a multi-part build this
     # is. The server does not interpret it.
     part_name: str | None = None
@@ -67,6 +70,7 @@ def create_job(req: GenerateRequest):
             "num_inference_steps": req.num_inference_steps,
             "guidance_scale": req.guidance_scale,
             "seed": req.seed,
+            "target_faces": req.target_faces,
             "part_name": req.part_name,
         }.items()
         if v is not None

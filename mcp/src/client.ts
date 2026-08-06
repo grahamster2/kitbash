@@ -16,6 +16,7 @@ export interface JobResult {
   peak_vram_gib: number;
   vertices: number;
   faces: number;
+  decimated_from: number | null;
   watertight: boolean;
   file_bytes: number;
   params: Record<string, unknown>;
@@ -93,6 +94,7 @@ export function submitJob(body: {
   image_b64: string;
   part_name?: string;
   seed?: number;
+  target_faces?: number;
   octree_resolution?: number;
   num_inference_steps?: number;
   guidance_scale?: number;
