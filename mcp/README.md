@@ -57,8 +57,8 @@ pipeline; see `docs/SETUP-GPU.md`.
 **Meshes come out dense** — 300k+ faces, far too heavy for a game engine.
 Decimation before import is not optional.
 
-**Placement is glTF convention: +Y is up.** Blender and Roblox are Z-up and
-convert on import, so a part at `y=2` here lands at `z=2` there.
+**Placement is glTF convention: +Y is up.** Roblox is Y-up too, so placement
+carries over unchanged. Blender is Z-up and converts on import.
 
 ## Smoke tests
 

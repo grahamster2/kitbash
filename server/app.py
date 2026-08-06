@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 import assemble as assembly
 import config
+import export
 import jobs
 import pipeline
 
@@ -190,6 +191,63 @@ def describe_part(job_id: str):
     if job["status"] != jobs.DONE:
         raise HTTPException(409, f"job is {job['status']}, not done")
     return assembly.describe(Path(job["result"]["mesh_path"]))
+
+
+class ExportRequest(BaseModel):
+    job_id: str | None = Field(None, description="Export a single generated part")
+    scene_id: str | None = Field(None, description="Export an assembled scene")
+    target: str = Field("roblox", description=f"one of {export.TARGETS}")
+    height_studs: float | None = Field(
+        None,
+        description=(
+            "Rescale so the result is this tall. Generated meshes normalise to "
+            "~2 units and one unit is one stud, so without this everything "
+            "arrives knee-high."
+        ),
+    )
+
+
+@api.post("/export")
+def export_mesh(req: ExportRequest):
+    """Write a part or scene out under a target's constraints."""
+    if bool(req.job_id) == bool(req.scene_id):
+        raise HTTPException(400, "give exactly one of job_id or scene_id")
+
+    if req.job_id:
+        job = jobs.get(req.job_id)
+        if job is None:
+            raise HTTPException(404, f"no such job: {req.job_id}")
+        if job["status"] != jobs.DONE:
+            raise HTTPException(409, f"job is {job['status']}, not done")
+        source = Path(job["result"]["mesh_path"])
+        out_dir = source.parent / "export" / req.target
+    else:
+        scene_dir = config.OUT_DIR / "scenes" / req.scene_id
+        matches = sorted(scene_dir.glob("*.glb")) if scene_dir.exists() else []
+        if not matches:
+            raise HTTPException(404, f"no such scene: {req.scene_id}")
+        source = matches[0]
+        out_dir = scene_dir / "export" / req.target
+
+    try:
+        return export.export_for(source, req.target, out_dir, req.height_studs)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@api.get("/export/file")
+def get_exported_file(path: str):
+    """Serve a file produced by /export, by the absolute path it reported.
+
+    Restricted to OUT_DIR: this takes a caller-supplied path, and without the
+    check it would happily serve anything on the machine.
+    """
+    resolved = Path(path).resolve()
+    if not resolved.is_relative_to(config.OUT_DIR.resolve()):
+        raise HTTPException(403, "path is outside the output directory")
+    if not resolved.is_file():
+        raise HTTPException(404, f"no such file: {path}")
+    return FileResponse(resolved, filename=resolved.name)
 
 
 @api.post("/admin/unload")

@@ -156,6 +156,44 @@ export function describePart(id: string): Promise<{
   return request(`/jobs/${id}/describe`, undefined, 15_000);
 }
 
+export interface ExportResult {
+  target: string;
+  primary: string;
+  files: Record<string, string | string[]>;
+  parts: { name: string; faces: number }[];
+  part_count: number;
+  total_faces: number;
+  source_faces: number;
+  size: number[];
+  pivot: string;
+  warnings: string[];
+}
+
+export function exportMesh(body: {
+  job_id?: string;
+  scene_id?: string;
+  target: string;
+  height_studs?: number;
+}): Promise<ExportResult> {
+  return request<ExportResult>("/export", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function downloadExported(remotePath: string): Promise<Uint8Array> {
+  const res = await fetch(
+    `${SERVER_URL}/export/file?path=${encodeURIComponent(remotePath)}`,
+  );
+  if (!res.ok) {
+    throw new KitbashError(
+      `download of ${remotePath} failed: ${res.status} ${res.statusText}`,
+    );
+  }
+  return new Uint8Array(await res.arrayBuffer());
+}
+
 export async function downloadScene(sceneId: string): Promise<Uint8Array> {
   const res = await fetch(`${SERVER_URL}/scenes/${sceneId}/mesh`);
   if (!res.ok) {

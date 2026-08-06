@@ -54,13 +54,15 @@ estimated.
 
 ## Coordinate convention
 
-glTF: **+Y is up**, +X right, +Z toward the viewer.
+glTF: **+Y is up**, +X right, +Z toward the viewer. Stack along Y.
 
-Blender and Roblox are Z-up and convert on import, so a part placed at `y=2`
-here lands at `z=2` there. This is consistent and predictable, but it does mean
-a part placed at `[0, -1.1, 0.5]` shows up in Blender at `(0, -0.5, -1.1)`.
+**Roblox is Y-up too**, so nothing is converted on import — what you place is
+what you get, and the importer's defaults are already correct.
 
-Stack along Y.
+**Blender is Z-up** and converts, mapping glTF `(x, y, z)` to Blender
+`(x, -z, y)`. A part placed at `[0, -1.1, 0.5]` shows up in Blender at
+`(0, -0.5, -1.1)`. This trips people up when they verify placement in Blender
+and conclude the assembly is broken; it isn't.
 
 ## Transform order
 

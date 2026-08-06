@@ -286,8 +286,9 @@ server.registerTool(
       "get real dimensions rather than guessing. Rotations are XYZ euler " +
       "degrees, applied after scale and before translation.\n\n" +
       "Coordinates are glTF convention: +Y is UP, +X right, +Z toward the " +
-      "viewer. Blender and Roblox are Z-up and will convert on import, so a " +
-      "part placed at y=2 here appears at z=2 there. Stack parts along Y.",
+      "viewer. Stack parts along Y. Roblox is Y-up too, so placement carries " +
+      "over unchanged. Blender is Z-up and converts on import, mapping " +
+      "(x, y, z) to (x, -z, y) — expected, not a bug.",
     inputSchema: {
       parts: z
         .array(
@@ -330,6 +331,72 @@ server.registerTool(
         parts: scene.parts.map((p) => ({ name: p.name, faces: p.faces })),
         size: scene.size,
         bytes: glb.byteLength,
+      });
+    } catch (err) {
+      return failure(err instanceof Error ? err.message : String(err));
+    }
+  },
+);
+
+server.registerTool(
+  "export_for_roblox",
+  {
+    title: "Export a part or scene for Roblox",
+    description:
+      "Writes a .glb (and an .obj fallback) that satisfies Roblox Studio's " +
+      "import constraints, and saves it locally.\n\n" +
+      "Roblox Studio imports .glb natively, so this is not a format " +
+      "conversion — it enforces the constraints:\n" +
+      "- 20,000 triangles PER MESH. The cap is per MeshPart, not per file, so " +
+      "  an assembled 10-part model has a 200k budget while one welded 100k " +
+      "  blob is rejected. Over-budget parts are decimated individually.\n" +
+      "- 1 file unit = 1 stud. Generated meshes normalise to ~2 units, so " +
+      "  without height_studs everything arrives knee-high.\n" +
+      "- Pivot on the ground plane, so the model does not spawn half-buried.\n\n" +
+      "Give exactly one of job_id or scene_id.",
+    inputSchema: {
+      job_id: z.string().optional().describe("Export one generated part"),
+      scene_id: z.string().optional().describe("Export an assembled scene"),
+      output_path: z.string().describe("Where to write the .glb locally"),
+      height_studs: z
+        .number()
+        .optional()
+        .describe("Desired height in studs. A human character is about 5."),
+      target: z
+        .enum(["roblox", "dcc"])
+        .optional()
+        .describe(
+          "'roblox' applies the constraints above. 'dcc' converts container " +
+            "format only and leaves units and origin alone, for Blender or " +
+            "similar. Default 'roblox'.",
+        ),
+    },
+  },
+  async ({ job_id, scene_id, output_path, height_studs, target }) => {
+    try {
+      if (!job_id === !scene_id) {
+        return failure("Give exactly one of job_id or scene_id.");
+      }
+      const result = await api.exportMesh({
+        job_id,
+        scene_id,
+        target: target ?? "roblox",
+        height_studs,
+      });
+      const glb = await api.downloadExported(result.primary);
+      const out = resolve(output_path);
+      await mkdir(dirname(out), { recursive: true });
+      await writeFile(out, glb);
+      return json({
+        output_path: out,
+        target: result.target,
+        parts: result.parts,
+        total_faces: result.total_faces,
+        source_faces: result.source_faces,
+        size_studs: result.size,
+        pivot: result.pivot,
+        bytes: glb.byteLength,
+        warnings: result.warnings,
       });
     } catch (err) {
       return failure(err instanceof Error ? err.message : String(err));
