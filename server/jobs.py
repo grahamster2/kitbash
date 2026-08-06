@@ -151,6 +151,38 @@ def _loop():
             _queue.task_done()
 
 
+def rehydrate():
+    """Reload finished jobs from disk at startup.
+
+    Without this, /jobs is empty after every restart even though the results
+    are still on disk and /jobs/{id} can find them — which makes the app's
+    history panel look like it lost your work.
+
+    Jobs recorded as queued or running did not survive the restart; there is no
+    process still working on them, so they are marked failed rather than left
+    to look perpetually in-flight.
+    """
+    if not config.OUT_DIR.exists():
+        return
+    found = []
+    for path in config.OUT_DIR.glob("*/job.json"):
+        try:
+            job = json.loads(path.read_text())
+        except Exception:
+            log.warning("skipping unreadable %s", path)
+            continue
+        if job.get("status") in (QUEUED, RUNNING):
+            job["status"] = ERROR
+            job["error"] = "server restarted while this job was in flight"
+        found.append(job)
+
+    found.sort(key=lambda j: j.get("created_at") or 0)
+    with _jobs_lock:
+        for job in found[-config.MAX_JOB_HISTORY:]:
+            _jobs.setdefault(job["id"], job)
+    log.info("rehydrated %d jobs from %s", len(found), config.OUT_DIR)
+
+
 def start_worker():
     global _worker
     if _worker is not None and _worker.is_alive():

@@ -34,6 +34,7 @@ api = FastAPI(title="Kitbash GPU server", version="0.1.0")
 @api.on_event("startup")
 def _startup():
     config.OUT_DIR.mkdir(parents=True, exist_ok=True)
+    jobs.rehydrate()
     jobs.start_worker()
     log.info("listening; outputs -> %s", config.OUT_DIR)
 
