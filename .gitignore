@@ -52,3 +52,6 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Local scratch pulls from the GPU box
+.local-out/
