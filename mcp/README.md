@@ -32,6 +32,7 @@ the GPU box when it is not.
 | `generate_part` | Reference image → `.glb` on disk |
 | `describe_part` | Bounds, size and center of a finished part |
 | `assemble_parts` | Compose parts into one scene, one named node each |
+| `export_for_roblox` | Write out under Roblox's import constraints |
 | `get_generation_job` | Status of a running job |
 | `save_mesh` | Download a job that finished after a timeout |
 | `list_generation_jobs` | Recent jobs |
@@ -72,4 +73,10 @@ Assembly on its own, reusing already-completed jobs so it runs in a second:
 
 ```bash
 KITBASH_SERVER_URL=http://<gpu-host>:8188 node scripts/assemble-demo.mjs
+```
+
+Assemble and export for Roblox:
+
+```bash
+KITBASH_SERVER_URL=http://<gpu-host>:8188 node scripts/export-demo.mjs
 ```
