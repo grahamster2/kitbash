@@ -78,6 +78,10 @@ class GenerateRequest(BaseModel):
     # Raw meshes come out at 300k+ faces, far too heavy for a game engine.
     # Decimation is cheap (~0.3s) and happens before export.
     target_faces: int | None = None
+    # Paint the finished mesh with the reference image it was generated from.
+    # Defaults on wherever the generator supplies no colour of its own.
+    texture: bool | None = None
+    texture_mode: str | None = Field(None, description='"uv", "atlas" or "vertex"')
     # Free-form label so a caller can tag which part of a multi-part build this
     # is. The server does not interpret it.
     part_name: str | None = None
@@ -167,6 +171,8 @@ def create_job(req: GenerateRequest):
             "guidance_scale": req.guidance_scale,
             "seed": req.seed,
             "target_faces": req.target_faces,
+            "texture": req.texture,
+            "texture_mode": req.texture_mode,
             "part_name": req.part_name,
             "generator": req.generator,
             "textured": req.textured,

@@ -52,7 +52,12 @@ TRELLIS_HF_HOME = os.environ.get("KITBASH_TRELLIS_HF_HOME", r"D:\hf-cache")
 
 # Q6_K is Q4 speed at closer-to-Q8 fidelity for the same VRAM — quantization is
 # a disk/speed knob here, not a VRAM one, because the three DiTs load serially.
-TRELLIS_QUANT = os.environ.get("KITBASH_TRELLIS_QUANT", "GGUF Q6_K")
+# Q8_0, not a K-quant. The K-quantised 512 texture DiTs (Q4_K_M, Q6_K) decode
+# to input-independent noise — the rainbow atlases — while Q8_0 of the same
+# model is clean. The earlier "Q6_K is the sweet spot" finding compared a Q8
+# dragon against Q6 props and blamed the subject. Costs ~55s more per textured
+# generation; peak VRAM is set by the bake stage either way, so it still fits.
+TRELLIS_QUANT = os.environ.get("KITBASH_TRELLIS_QUANT", "GGUF Q8_0")
 
 # 512 + 2048, NOT the eval's 1024_cascade + 4096. docs/QUALITY-COMPARISON.md ran
 # the recommended settings on a solid crate and killed it at 21 minutes, pinned

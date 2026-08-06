@@ -107,7 +107,7 @@ def test_the_defaults_sent_are_the_settings_that_actually_completed(fake_worker,
     request = fake_worker.requests[0]
     assert request["pipeline_type"] == "512"
     assert request["texture_size"] == 2048
-    assert request["quant"] == "GGUF Q6_K"
+    assert request["quant"] == "GGUF Q8_0"
     assert request["target_faces"] == 20_000
     assert request["steps"] == 12
 
@@ -253,7 +253,7 @@ def test_the_params_recorded_are_what_was_sent(fake_worker, out_dir):
     result = generate(out_dir, seed=11)
 
     assert result["params"] == {
-        "quant": "GGUF Q6_K", "pipeline_type": "512", "texture_size": 2048,
+        "quant": "GGUF Q8_0", "pipeline_type": "512", "texture_size": 2048,
         "num_inference_steps": 12, "seed": 11, "target_faces": 20_000,
         "textured": True,
     }

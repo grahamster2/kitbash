@@ -9,15 +9,17 @@ stripes comes back white with navy stripes, registration and all.
 
 This is what StableProjectorz does interactively; here it runs headless.
 
-The whole technique turns on one number we are not told: the camera the mesh was
-generated under. Rather than assume TRELLIS's canonical orientation, this module
-*measures* it -- `fit_camera` searches pose, perspective and framing for the view
-whose silhouette best covers the reference's alpha matte, and reports the IoU it
-reached so a caller can tell a good fit from a shrug. (Empirically that search
-lands on TRELLIS's canonical frame: +Y up, the input view near yaw 0. See
-docs/TEXTURING.md.)
+The whole technique turns on one thing we are not told: the camera the mesh was
+generated under. There is no canonical answer to assume. Measured on this
+stack's own output (docs/TEXTURING.md), TRELLIS 2's **textured** path returns a
++Y-up mesh and its **untextured** path returns the same subject +Z-up, and the
+azimuth is not canonical on either -- two props generated from 3/4-view
+references fitted 318 deg apart. So `fit_camera` *measures* the view instead:
+it searches pose, perspective and framing for the one whose silhouette best
+covers the reference's alpha matte, and reports the IoU it reached so a caller
+can tell a good fit from a shrug.
 
-Two output modes:
+Three output modes:
 
 - `mode="uv"` (default) -- **projective UV mapping**. The atlas *is* the
   reference image, and each face's corners carry the pixel coordinates they
@@ -25,6 +27,9 @@ Two output modes:
   lettering stays legible, a 3-pixel pinstripe stays 3 pixels. Requires no UV
   unwrap, which is what makes it available even on the untextured generator path
   that returns no UVs at all.
+- `mode="atlas"` -- rebake into the UV unwrap the mesh already has. Even texel
+  density and no projective stretch, at the cost of one resample. Use it when
+  the output has to look like a normal texture to whatever consumes it.
 - `mode="vertex"` -- per-vertex colours. Simpler and smaller, but its resolution
   is the mesh's vertex count, so a 7k-vertex aircraft turns the stripes to
   smears. Kept for viewers and exporters that will not take a texture.
@@ -76,7 +81,9 @@ _REFINE_STARTS = 24
 # faces project to a sliver of pixels and stretch that sliver across the whole
 # triangle, which reads as a smear of streaks along the silhouette.
 _MIN_FACING = 0.15
-# ...and only if this much of its projected area actually survived the z-test.
+# ...and only if it won this much of its own projected area in the z-buffer, or
+# else had all three corners land on the depth surface. See _face_visibility for
+# why one of those two tests alone is not enough.
 _MIN_VISIBLE_FRACTION = 0.6
 # Shadow-map tolerances, in units of the mesh's bounding radius: how close to
 # the depth buffer a point has to be to count as "on the visible surface".
@@ -444,7 +451,12 @@ def rasterize_uv(
         fbuf[y0:y1 + 1, x0:x1 + 1][inside] = f
         block = bary[y0:y1 + 1, x0:x1 + 1]
         block[inside] = np.stack([w0, w1, w2], axis=-1)[inside]
-    return fbuf, np.clip(bary, 0.0, 1.0)
+    # `pad` admits texels just outside the triangle, whose weights go slightly
+    # negative. Clamping and renormalising snaps them to the nearest point *on*
+    # the triangle rather than extrapolating the surface past its own edge.
+    bary = np.clip(bary, 0.0, 1.0)
+    total = bary.sum(axis=-1, keepdims=True)
+    return fbuf, np.divide(bary, total, out=bary, where=total > 0)
 
 
 # --------------------------------------------------------------------------
@@ -723,6 +735,16 @@ def project_uv(
     else:
         stats["mirrored"] = 0
 
+    # Projected corners can land *outside* the reference frame -- a subject that
+    # fills the image has silhouette geometry whose corners project past the
+    # edge -- and the atlas is taller than the image, so an unclamped UV walks
+    # off the bottom of the photo and into the fallback swatch strip. Those
+    # faces then render as whatever swatch they hit, or as black where the strip
+    # is unused. Clamp to the photo instead; that is what a CLAMP sampler would
+    # do and it keeps edge triangles the colour of the edge.
+    np.clip(corner_xy[..., 0], 0, img_w - 1, out=corner_xy[..., 0])
+    np.clip(corner_xy[..., 1], 0, img_h - 1, out=corner_xy[..., 1])
+
     # ---- atlas: reference on top, fallback swatches in a strip below --------
     subject_rgb = _dilate_rgb(rgb_full, mask)
     cell = max(8, int(round(max(img_w, img_h) / 128)))
@@ -743,6 +765,11 @@ def project_uv(
     dominant = _dominant_color(rgb_full, mask)
     flood_rgb = _flood_face_colors(mesh, painted, face_rgb, dominant)
     stats["flooded"] = int((~painted).sum())
+
+    # Seed the whole strip with the dominant colour, not black: the palette
+    # rarely fills all the cells, and a bilinear sampler at a cell boundary will
+    # happily pull an unused neighbour in as a dark fringe.
+    atlas[img_h:] = dominant
 
     # Quantise the flood colours into a small swatch grid and point the
     # unpainted faces at their cell centres.

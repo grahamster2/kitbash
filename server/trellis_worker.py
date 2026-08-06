@@ -14,6 +14,7 @@ server and no workflow JSON, which is what makes a plain subprocess enough.
 import base64
 import io
 import json
+import math
 import os
 import sys
 import threading
@@ -240,10 +241,20 @@ def _simplify_only(nodes, mesh, req):
         mesh=mesh, target_face_num=req["target_faces"],
         method="Cumesh", verbose=False,
     )
-    return trimesh.Trimesh(
+    tri = trimesh.Trimesh(
         vertices=simplified.vertices.cpu().numpy(),
         faces=simplified.faces.cpu().numpy(),
     )
+
+    # The postprocess node the textured path uses also converts TRELLIS's Z-up
+    # output to glTF's Y-up. Skipping that node skipped the conversion too, so
+    # every untextured part shipped lying on its side — measured as a 91.5 deg
+    # roll against the textured path's 0. Assembly cannot recover from this:
+    # a sideways wing has a perfectly valid bounding box.
+    tri.apply_transform(
+        trimesh.transformations.rotation_matrix(-math.pi / 2, [1, 0, 0])
+    )
+    return tri
 
 
 def main():

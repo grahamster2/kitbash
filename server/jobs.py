@@ -19,6 +19,7 @@ from pathlib import Path
 
 import config
 import pipeline
+import texturing
 import trellis
 
 log = logging.getLogger("kitbash.jobs")
@@ -144,6 +145,13 @@ def _run_one(job_id: str):
             raise ValueError(f"unknown generator: {name}")
 
         result = generator.generate_shape(image_b64, _job_dir(job_id), job["params"])
+
+        # Paint here rather than in a later call: back-projection needs the
+        # reference image, and the image is deliberately dropped the moment the
+        # job ends so it never reaches disk or an API response.
+        if _wants_texture(job["params"], result):
+            result = _back_project(image_b64, result, job["params"])
+
         _set(job_id, status=DONE, finished_at=time.time(), result=result)
         log.info("job %s done in %ss", job_id, result["generation_seconds"])
     except Exception as exc:
@@ -153,6 +161,58 @@ def _run_one(job_id: str):
     finally:
         with _jobs_lock:
             _images.pop(job_id, None)
+
+
+def _wants_texture(params: dict, result: dict) -> bool:
+    """Default on wherever nothing else supplies colour.
+
+    Hunyuan3D has no texture path at all, and TRELLIS 2 untextured deliberately
+    skips its own bake, so both arrive grey. A mesh that already carries a
+    base-colour texture is left alone.
+    """
+    asked = params.get("texture")
+    if asked is not None:
+        return bool(asked)
+    return not result.get("base_color_texture")
+
+
+def _back_project(image_b64: str, result: dict, params: dict) -> dict:
+    """Project the reference photograph onto the finished mesh.
+
+    Failure here must not fail the job — the mesh is still good untextured, and
+    semantic materials remain available downstream.
+    """
+    import base64
+    import io
+
+    from PIL import Image
+
+    mesh_path = Path(result["mesh_path"])
+    try:
+        t0 = time.time()
+        image = Image.open(io.BytesIO(base64.b64decode(image_b64)))
+        painted, stats = texturing.texture_from_reference(
+            str(mesh_path), image, mode=params.get("texture_mode", "uv")
+        )
+        painted.export(str(mesh_path))
+        result = {
+            **result,
+            "textured_by": "back_projection",
+            "texture_seconds": round(time.time() - t0, 1),
+            # Surfaced so a caller can fall back to semantic materials rather
+            # than ship a mesh painted from a pose that never fitted.
+            "silhouette_iou": round(float(stats.get("silhouette_iou", 0.0)), 3),
+            "texture_coverage": round(float(stats.get("coverage", 0.0)), 3),
+            "file_bytes": mesh_path.stat().st_size,
+        }
+        log.info("back-projected %s: iou=%.2f coverage=%.2f",
+                 mesh_path.parent.name, result["silhouette_iou"],
+                 result["texture_coverage"])
+    except Exception:
+        log.warning("back-projection failed; keeping the untextured mesh",
+                    exc_info=True)
+        result = {**result, "textured_by": None}
+    return result
 
 
 def _loop():
