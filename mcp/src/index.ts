@@ -113,6 +113,14 @@ server.registerTool(
             "lower it to 128 for simple parts or a smaller card.",
         ),
       num_inference_steps: z.number().int().optional().describe("Default 30."),
+      guidance_scale: z
+        .number()
+        .optional()
+        .describe(
+          "How closely to follow the reference image. Default 5.0. Raise it " +
+            "when the mesh drifts from the image, lower it when the result " +
+            "looks over-constrained or noisy.",
+        ),
       timeout_seconds: z
         .number()
         .int()
@@ -142,6 +150,7 @@ server.registerTool(
         target_faces: args.target_faces,
         octree_resolution: args.octree_resolution,
         num_inference_steps: args.num_inference_steps,
+        guidance_scale: args.guidance_scale,
       });
 
       // A cold generation runs ~110s, well past the 60s default request

@@ -8,9 +8,12 @@
 $ErrorActionPreference = "Continue"
 
 $TaskName = "KitbashServer"
-$RunPs1   = "D:\kitbash\server\run.ps1"
+# Sits next to this script, so the task points at wherever the repo actually is.
+$RunPs1   = Join-Path $PSScriptRoot "run.ps1"
+$Port     = if ($env:KITBASH_PORT) { $env:KITBASH_PORT } else { 8188 }
 
 if (-not (Test-Path $RunPs1)) { Write-Output "MISSING: $RunPs1"; exit 1 }
+Write-Output "server: $RunPs1 (port $Port)"
 
 # --- scheduled task ---------------------------------------------------------
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
@@ -41,10 +44,10 @@ Write-Output "registered scheduled task: $TaskName"
 Remove-NetFirewallRule -DisplayName "Kitbash server (Tailscale)" -ErrorAction SilentlyContinue
 
 New-NetFirewallRule -DisplayName "Kitbash server (Tailscale)" `
-    -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8188 `
+    -Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port `
     -RemoteAddress 100.64.0.0/10 -Profile Any | Out-Null
 
-Write-Output "firewall rule added: TCP 8188 from 100.64.0.0/10 only"
+Write-Output "firewall rule added: TCP $Port from 100.64.0.0/10 only"
 
 Start-ScheduledTask -TaskName $TaskName
 Write-Output "task started"

@@ -22,7 +22,7 @@ DEFAULT_OCTREE_RESOLUTION = int(os.environ.get("KITBASH_OCTREE_RESOLUTION", "256
 DEFAULT_INFERENCE_STEPS = int(os.environ.get("KITBASH_INFERENCE_STEPS", "30"))
 DEFAULT_GUIDANCE_SCALE = float(os.environ.get("KITBASH_GUIDANCE_SCALE", "5.0"))
 
-# Keep the model in VRAM between jobs. Loading costs ~30s, so for a multi-part
+# Keep the model in VRAM between jobs. Loading costs ~70s, so for a multi-part
 # build (the whole point of this project) unloading between parts is a big loss.
 # Set to 0 when a second model needs the VRAM.
 KEEP_MODEL_RESIDENT = os.environ.get("KITBASH_KEEP_RESIDENT", "1") != "0"
