@@ -270,3 +270,17 @@ def test_assemble_rejects_an_unknown_material(make_mesh, tmp_path):
             [{"name": "hull", "mesh_path": str(path), "material": "unobtainium"}],
             tmp_path / "scene.glb",
         )
+
+
+def test_materials_are_double_sided(make_mesh, tmp_path):
+    """Generated shells are not watertight. glTF defaults doubleSided to false,
+    so a single-sided material lets the viewer cull backfaces and the model
+    reads as shattered."""
+    path = make_mesh(trimesh.creation.box())
+    out = tmp_path / "scene.glb"
+
+    assemble.assemble([{"name": "hull", "mesh_path": str(path)}], out)
+
+    scene = trimesh.load(str(out))
+    material = next(iter(scene.geometry.values())).visual.material
+    assert material.doubleSided is True

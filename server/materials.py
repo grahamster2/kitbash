@@ -124,7 +124,11 @@ def apply_to_mesh(
     if color:
         spec = {**spec, "baseColorFactor": parse_color(color)}
     mesh.visual = trimesh.visual.TextureVisuals(
-        material=PBRMaterial(name=f"kitbash_{family}", **spec)
+        # doubleSided, always. glTF defaults it to false, and generated shells
+        # are not watertight — a single-sided material lets the viewer cull
+        # backfaces and you see straight through the model, which reads as a
+        # shattered mesh rather than a material setting.
+        material=PBRMaterial(name=f"kitbash_{family}", doubleSided=True, **spec)
     )
     return family
 
