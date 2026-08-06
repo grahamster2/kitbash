@@ -42,6 +42,38 @@ Which buys three things:
   MeshParts in Roblox.
 - **Parts are reusable.** The same generated wheel goes on four vehicles.
 
+## Cropping one reference per part does not work
+
+The obvious way to get per-part references is to crop them out of a single
+image of the whole object. It fails, and the failure is instructive.
+
+Tested on a photograph of a Beechcraft Bonanza, cropping tail, propeller, wing
+and cowl. **Every crop generated a complete aeroplane.** Not a bad tail — an
+aeroplane. Tightening the crops, keying the background to real alpha and
+padding generously all changed the result and none of them fixed it.
+
+These models are trained on complete objects and carry a strong
+**object-completion prior**: shown an ambiguous partial view of something
+recognisable, they reconstruct the nearest whole object they know rather than
+the fragment in front of them. A wing seen edge-on in a side view is nearly
+information-free, so the prior wins outright.
+
+The first attempt failed differently and is worth recording too: padding the
+crop with opaque white produced meshes with the padding reconstructed as walls.
+An opaque background becomes geometry — parts need a real alpha matte.
+
+So per-part references have to **depict only that part**, which means either:
+
+- generating each one from its own prompt ("a single aircraft propeller,
+  isolated, plain background") — this is why the image provider is load-bearing
+  rather than a convenience, and
+- **scripting the parts that are scriptable**, which is most hard-surface
+  hardware anyway. See [PROCEDURAL.md](PROCEDURAL.md).
+
+A single generation of the whole object still works well and remains the right
+move for the organic hero part. It just cannot be subdivided after the fact by
+re-generating from crops.
+
 ## Placement is the caller's job
 
 `assemble_parts` does not guess where parts go. A coding agent driving this over
