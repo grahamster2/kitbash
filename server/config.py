@@ -30,6 +30,16 @@ KEEP_MODEL_RESIDENT = os.environ.get("KITBASH_KEEP_RESIDENT", "1") != "0"
 # How many finished jobs to retain in memory before evicting the oldest.
 MAX_JOB_HISTORY = int(os.environ.get("KITBASH_MAX_JOB_HISTORY", "200"))
 
+# --- procedural primitives --------------------------------------------------
+# Radial segments on round scripted parts. 24 is smooth at prop scale and still
+# cheap; the point of scripting is that this is a dial rather than a surprise.
+PRIMITIVE_SECTIONS = int(os.environ.get("KITBASH_PRIMITIVE_SECTIONS", "24"))
+
+# Refuse to build a primitive heavier than this. Matches Roblox's per-MeshPart
+# triangle cap, so a scripted part can never be the thing that fails an import
+# — nothing here needs more, and a parameter combination that does is a mistake.
+PRIMITIVE_MAX_FACES = int(os.environ.get("KITBASH_PRIMITIVE_MAX_FACES", "20000"))
+
 # --- image generation -------------------------------------------------------
 # Which provider turns a prompt into a reference image. "fal" uses the user's
 # own fal.ai key and bills them directly; "local" is scaffolded. See imagegen.py.

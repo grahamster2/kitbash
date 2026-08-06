@@ -23,6 +23,7 @@ import imagegen
 import jobs
 import materials
 import pipeline
+import primitives
 
 logging.basicConfig(
     level=logging.INFO,
@@ -130,8 +131,114 @@ def get_mesh(job_id: str):
     )
 
 
+class PrimitiveRequest(BaseModel):
+    kind: str = Field(..., description=f"One of {primitives.kinds()}")
+    params: dict | None = Field(
+        None, description="Dimensions and options; see GET /primitives."
+    )
+    part_name: str | None = Field(None, description="Defaults to the kind.")
+    material: str | None = Field(
+        None,
+        description=(
+            "Override the material the kind implies — a crate is wood, a pipe "
+            f"is metal. One of {materials.families()}."
+        ),
+    )
+    color: str | None = Field(None, description='Base colour as "#rrggbb".')
+    uv_scale: float | None = Field(
+        None,
+        description=(
+            "Emit box-projection UVs at one texture tile per this many studs. "
+            "Off by default: it splits vertices at every seam, which ends the "
+            "welded topology, and nothing downstream has a texture yet."
+        ),
+    )
+
+
+@api.get("/primitives")
+def list_primitives():
+    """The scripted catalogue: kinds, parameters, types, defaults and units.
+
+    Exists so an agent can discover the library by calling it rather than by
+    being told about it, the same reason the MCP tool descriptions carry
+    numbers instead of prose.
+    """
+    return {
+        "kinds": primitives.catalogue(),
+        "units": "1 file unit = 1 stud, matching /export",
+        "origin": "bounding-box centre, matching generated parts",
+        "max_faces": config.PRIMITIVE_MAX_FACES,
+    }
+
+
+@api.get("/primitives/{kind}")
+def get_primitive(kind: str):
+    if kind not in primitives.KINDS:
+        raise HTTPException(404, f"no such kind: {kind}")
+    return primitives.KINDS[kind].as_dict()
+
+
+@api.post("/primitives")
+def create_primitive(req: PrimitiveRequest):
+    """Build a scripted part and record it as a finished job.
+
+    Deliberately synchronous and deliberately *not* queued: this is a
+    millisecond of numpy, and the queue exists to serialise access to a GPU
+    that this path never touches. Queueing it behind a 40-second generation
+    would be a bug, not a policy.
+
+    What it does share is the job record, so the id it returns goes into
+    /assemble, /export and /jobs/{id}/describe unchanged — assembly cannot tell
+    a scripted part from a generated one, which is the whole point.
+    """
+    job_id = uuid.uuid4().hex[:12]
+    try:
+        result = primitives.store(
+            req.kind, req.params, config.OUT_DIR / job_id,
+            part_name=req.part_name, material=req.material, color=req.color,
+            uv_scale=req.uv_scale,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    now = time.time()
+    job = {
+        "id": job_id,
+        "type": "primitive",
+        "status": jobs.DONE,
+        "created_at": now,
+        "started_at": now,
+        "finished_at": time.time(),
+        "params": {"kind": req.kind, "part_name": req.part_name or req.kind},
+        "result": result,
+        "error": None,
+    }
+    _record(job)
+    return job
+
+
+def _record(job: dict):
+    """File an already-finished job into the registry.
+
+    jobs.submit() is the queued path and would hand this to the worker, which
+    only knows how to generate. Everything else about the record — the disk
+    mirror that survives a restart, the history cap, the /jobs listing — should
+    apply identically, so it is reproduced here rather than skipped.
+    """
+    with jobs._jobs_lock:
+        jobs._jobs[job["id"]] = job
+        while len(jobs._jobs) > config.MAX_JOB_HISTORY:
+            old_id, old = jobs._jobs.popitem(last=False)
+            if old["status"] in (jobs.QUEUED, jobs.RUNNING):
+                jobs._jobs[old_id] = old
+                jobs._jobs.move_to_end(old_id, last=False)
+                break
+            jobs._images.pop(old_id, None)
+    jobs._persist(job)
+
+
 class PartPlacement(BaseModel):
-    job_id: str = Field(..., description="A completed image_to_3d job")
+    job_id: str = Field(..., description="A completed image_to_3d or primitive job")
     name: str = Field(..., description="glTF node name for this part")
     position: list[float] | None = Field(None, description="[x, y, z]")
     rotation: list[float] | None = Field(None, description="[rx, ry, rz] in degrees")
@@ -182,6 +289,12 @@ def _part_mesh_path(p: PartPlacement) -> Path:
     return mesh_path
 
 
+def _recorded_material(job_id: str) -> str | None:
+    job = jobs.get(job_id)
+    result = (job or {}).get("result") or {}
+    return result.get("material")
+
+
 @api.post("/assemble")
 def assemble_scene(req: AssembleRequest):
     """Compose finished parts into a single glTF with one node per part."""
@@ -195,7 +308,10 @@ def assemble_scene(req: AssembleRequest):
             "position": p.position,
             "rotation": p.rotation,
             "scale": p.scale,
-            "material": p.material,
+            # A scripted part already knows its material; falling back to
+            # guessing from the node name would turn a wooden barrel into a
+            # metal one, since "barrel" reads as gun barrel.
+            "material": p.material or _recorded_material(p.job_id),
             "color": p.color,
         }
         for p in req.parts

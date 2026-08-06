@@ -13,7 +13,7 @@ python -m pytest
 `pytest.ini` puts `server/` on the import path, because the modules import each
 other as top-level names (`import config`) the way uvicorn runs them.
 
-114 tests, ~1s.
+313 tests, ~2s.
 
 ## What is covered
 
@@ -22,7 +22,8 @@ other as top-level names (`import config`) the way uvicorn runs them.
 | `test_jobs.py` | submit/get/listing/stats, the job.json round trip, `rehydrate()`, history eviction, and that the input image never reaches disk or an API response |
 | `test_assemble.py` | `_transform` composition order, node-name deduplication, `describe()`, multi-part scenes |
 | `test_export.py` | the per-geometry triangle budget, `height_studs`, the roblox vs dcc pivot, texture/vertex-colour warnings |
-| `test_app.py` | every endpoint via `TestClient`, including the `/export/file` traversal guard |
+| `test_primitives.py` | the scripted library: every kind watertight, dimensioned as requested and under the face cap; the catalogue schema; parameter validation |
+| `test_app.py` | every endpoint via `TestClient`, including the `/export/file` traversal guard and that a scripted part assembles and exports like a generated one |
 
 ## What is deliberately not covered
 
@@ -36,6 +37,10 @@ other as top-level names (`import config`) the way uvicorn runs them.
   inline instead; asserting on job state while a thread races you is how you get
   a flaky suite. Nothing here tests two generations overlapping, because the
   queue exists precisely to make that impossible.
+- **Whether a primitive *looks* good.** The tests assert watertightness, exact
+  dimensions and face counts, none of which distinguish a designed crate from a
+  chamfered box. That check is a Blender render, and the ones that were looked
+  at are in [docs/PROCEDURAL.md](../../docs/PROCEDURAL.md).
 - **Whether the exported files import into Roblox Studio.** The triangle,
   scale and pivot constraints are asserted; that Studio then accepts the file is
   a manual check.

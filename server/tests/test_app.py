@@ -493,3 +493,171 @@ def test_post_images_rejects_an_unknown_provider(client):
 
 def test_get_image_404s_for_an_unknown_id(client):
     assert client.get("/images/nosuchimage").status_code == 404
+
+
+def test_get_primitives_lists_every_kind_with_its_parameters(client):
+    body = client.get("/primitives").json()
+
+    import primitives
+
+    assert [k["kind"] for k in body["kinds"]] == primitives.kinds()
+    assert body["max_faces"] == 20_000
+    crate = next(k for k in body["kinds"] if k["kind"] == "crate")
+    assert crate["material"] == "wood"
+    assert {p["name"] for p in crate["params"]} >= {"width", "height", "depth"}
+    assert all("default" in p for p in crate["params"])
+
+
+def test_get_one_primitive_returns_just_that_kind(client):
+    body = client.get("/primitives/barrel").json()
+
+    assert body["kind"] == "barrel"
+    assert body["params"]
+
+
+def test_get_an_unknown_primitive_404s(client):
+    assert client.get("/primitives/teapot").status_code == 404
+
+
+def test_post_primitives_returns_a_finished_job_record(client):
+    body = client.post("/primitives", json={"kind": "crate"}).json()
+
+    assert body["type"] == "primitive"
+    assert body["status"] == jobs.DONE
+    assert body["error"] is None
+    assert body["result"]["watertight"] is True
+    assert body["result"]["peak_vram_gib"] == 0.0
+
+
+def test_a_scripted_part_is_visible_to_the_normal_job_endpoints(client):
+    job_id = client.post("/primitives", json={"kind": "barrel"}).json()["id"]
+
+    assert client.get(f"/jobs/{job_id}").json()["id"] == job_id
+    assert client.get(f"/jobs/{job_id}/mesh").status_code == 200
+    assert client.get("/jobs").json()["jobs"][0]["id"] == job_id
+
+
+def test_describe_reports_the_dimensions_that_were_asked_for(client):
+    job_id = client.post(
+        "/primitives",
+        json={"kind": "crate", "params": {"width": 4.0, "height": 1.5, "depth": 2.0}},
+    ).json()["id"]
+
+    body = client.get(f"/jobs/{job_id}/describe").json()
+
+    assert body["size"] == [4.0, 1.5, 2.0]
+    assert body["center"] == [0.0, 0.0, 0.0]
+
+
+def test_a_scripted_part_assembles_alongside_a_generated_one(client, finished_job):
+    generated = finished_job("hull")
+    scripted = client.post("/primitives", json={"kind": "wheel"}).json()["id"]
+
+    body = client.post(
+        "/assemble",
+        json={
+            "parts": [
+                {"job_id": generated, "name": "hull"},
+                {"job_id": scripted, "name": "wheel", "position": [2, 0, 0]},
+            ]
+        },
+    ).json()
+
+    assert body["part_count"] == 2
+    assert [p["name"] for p in body["parts"]] == ["hull", "wheel"]
+
+
+def test_a_scripted_part_exports_for_roblox_without_being_decimated(client):
+    job_id = client.post("/primitives", json={"kind": "crate"}).json()["id"]
+
+    body = client.post(
+        "/export", json={"job_id": job_id, "target": "roblox", "height_studs": 4}
+    ).json()
+
+    assert body["total_faces"] == body["source_faces"]
+    assert body["size"][1] == pytest.approx(4.0)
+
+
+def test_post_primitives_mirrors_the_job_to_disk(client, out_dir):
+    job_id = client.post("/primitives", json={"kind": "plank"}).json()["id"]
+
+    saved = json.loads((out_dir / job_id / "job.json").read_text())
+
+    assert saved["status"] == jobs.DONE
+    assert saved["type"] == "primitive"
+
+
+def test_post_primitives_rejects_an_unknown_kind(client):
+    response = client.post("/primitives", json={"kind": "teapot"})
+
+    assert response.status_code == 400
+    assert "unknown kind" in response.json()["detail"]
+
+
+def test_post_primitives_rejects_a_bad_parameter(client):
+    response = client.post(
+        "/primitives", json={"kind": "crate", "params": {"width": -2}}
+    )
+
+    assert response.status_code == 400
+    assert "width" in response.json()["detail"]
+
+
+def test_post_primitives_rejects_an_impossible_opening(client):
+    response = client.post(
+        "/primitives",
+        json={"kind": "wall_panel", "params": {"width": 2.0, "opening_width": 2.0}},
+    )
+
+    assert response.status_code == 400
+
+
+def test_post_primitives_takes_a_material_override(client):
+    body = client.post(
+        "/primitives", json={"kind": "crate", "material": "dark_metal"}
+    ).json()
+
+    assert body["status"] == jobs.DONE
+
+
+def test_post_primitives_rejects_an_unknown_material(client):
+    response = client.post("/primitives", json={"kind": "crate", "material": "cheese"})
+
+    assert response.status_code == 400
+    assert "unknown material" in response.json()["detail"]
+
+
+def test_a_scripted_part_never_touches_the_queue(client):
+    client.post("/primitives", json={"kind": "crate"})
+
+    # No GPU is involved, so queueing it behind a 40-second generation would be
+    # a bug rather than a policy.
+    assert client.get("/health").json()["queue_depth"] == 0
+
+
+def test_assembly_keeps_a_primitives_own_material(client):
+    """A barrel is wood, but "barrel" reads as gun barrel — re-deriving the
+    material from the node name at assembly time would turn it metal."""
+    job = client.post("/primitives", json={"kind": "barrel"}).json()
+    assert job["result"]["material"] == "wood"
+
+    body = client.post(
+        "/assemble", json={"parts": [{"job_id": job["id"], "name": "barrel"}]}
+    ).json()
+
+    assert body["parts"][0]["material"] == "wood"
+
+
+def test_an_explicit_material_still_wins_over_the_recorded_one(client):
+    job = client.post("/primitives", json={"kind": "barrel"}).json()
+
+    body = client.post(
+        "/assemble",
+        json={
+            "parts": [
+                {"job_id": job["id"], "name": "barrel", "material": "dark_metal"}
+            ]
+        },
+    ).json()
+
+    assert body["parts"][0]["material"] == "dark_metal"
