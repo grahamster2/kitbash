@@ -98,12 +98,41 @@ export function submitJob(body: {
   octree_resolution?: number;
   num_inference_steps?: number;
   guidance_scale?: number;
+  generator?: string;
+  textured?: boolean;
+  texture?: boolean;
 }): Promise<Job> {
   return request<Job>("/jobs", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+export function decompose(plan: unknown): Promise<{
+  subject: string;
+  parts: unknown[];
+  job_ids: string[];
+  failed: unknown[];
+  warnings: string[];
+  elapsed_seconds: number;
+  assemble_request: unknown[];
+}> {
+  // A plan is many image generations and many meshes; the server holds the
+  // request open until every job is queued.
+  return request("/decompose", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(plan),
+  }, 600_000);
+}
+
+export function decomposeExamples(): Promise<{ examples: Record<string, unknown> }> {
+  return request("/decompose/examples", undefined, 20_000);
+}
+
+export function generators(): Promise<unknown> {
+  return request("/generators", undefined, 15_000);
 }
 
 export function getJob(id: string): Promise<Job> {

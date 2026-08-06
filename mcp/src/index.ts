@@ -113,6 +113,22 @@ server.registerTool(
             "lower it to 128 for simple parts or a smaller card.",
         ),
       num_inference_steps: z.number().int().optional().describe("Default 30."),
+      generator: z
+        .enum(["hunyuan3d", "trellis2"])
+        .optional()
+        .describe(
+          "trellis2 gives markedly better hard-surface geometry at a third of " +
+            "the VRAM; hunyuan3d is more tolerant of unprepared input. " +
+            "Call check_gpu_server for what is available.",
+        ),
+      texture: z
+        .boolean()
+        .optional()
+        .describe(
+          "Paint the mesh by projecting the reference image back onto it. On " +
+            "by default wherever the generator supplies no colour of its own. " +
+            "Real colour from the real photo, ~6s, no VRAM.",
+        ),
       guidance_scale: z
         .number()
         .optional()
@@ -151,6 +167,8 @@ server.registerTool(
         octree_resolution: args.octree_resolution,
         num_inference_steps: args.num_inference_steps,
         guidance_scale: args.guidance_scale,
+        generator: args.generator,
+        texture: args.texture,
       });
 
       // A cold generation runs ~110s, well past the 60s default request
@@ -255,6 +273,76 @@ server.registerTool(
       await mkdir(dirname(out), { recursive: true });
       await writeFile(out, glb);
       return json({ job_id, output_path: out, bytes: glb.byteLength });
+    } catch (err) {
+      return failure(err instanceof Error ? err.message : String(err));
+    }
+  },
+);
+
+server.registerTool(
+  "decomposition_examples",
+  {
+    title: "Worked decomposition plans",
+    description:
+      "Returns example plans in the format decompose_object expects. Read one " +
+      "before writing your own — the format carries several non-obvious rules " +
+      "about prompt wording that decide whether it works.",
+    inputSchema: {},
+  },
+  async () => {
+    try {
+      return json(await api.decomposeExamples());
+    } catch (err) {
+      return failure(err instanceof Error ? err.message : String(err));
+    }
+  },
+);
+
+server.registerTool(
+  "decompose_object",
+  {
+    title: "Build every part of a multi-part object from a plan",
+    description:
+      "Takes a decomposition plan and produces one mesh per part, returning " +
+      "job ids and a ready-to-use parts list for assemble_parts.\n\n" +
+      "You author the plan — you know what you are building and the server " +
+      "does not. Call decomposition_examples first for the format.\n\n" +
+      "Each part is generate (its own image prompt -> 3D), script (a " +
+      "parametric primitive) or mirror (another part reflected, free). A " +
+      "12-part aircraft costs 6 generations.\n\n" +
+      "Rules that decide whether this works, learned the hard way:\n" +
+      "- Give each part its OWN prompt. Cropping a photo of the whole object " +
+      "  returns whole objects — these models complete partial views.\n" +
+      "- The shared style suffix does nearly all the work of keeping parts " +
+      "  coherent, but must NOT name the whole object, or the completion prior " +
+      "  returns and a propeller comes back attached to an aeroplane.\n" +
+      "- Describe geometry, not the object. 'a bare fuselage with no wings' " +
+      "  gives an aeroplane; 'a hollow elongated shell with six oval " +
+      "  portholes' gives a shell.\n" +
+      "- Script anything dimensioned and hard-surface. Generation is worst at " +
+      "  exactly that, and a scripted strut is 192 triangles against 8,000.\n\n" +
+      "This runs for many minutes. Generation cost is per generated part.",
+    inputSchema: {
+      plan: z
+        .record(z.unknown())
+        .describe("The plan object. See decomposition_examples."),
+    },
+  },
+  async ({ plan }) => {
+    try {
+      const r = await api.decompose(plan);
+      return json({
+        subject: r.subject,
+        part_count: r.parts.length,
+        job_ids: r.job_ids,
+        failed: r.failed,
+        warnings: r.warnings,
+        elapsed_seconds: r.elapsed_seconds,
+        note:
+          "Parts are queued, not finished. Poll get_generation_job until each " +
+          "is done, then pass assemble_request to assemble_parts.",
+        assemble_request: r.assemble_request,
+      });
     } catch (err) {
       return failure(err instanceof Error ? err.message : String(err));
     }
