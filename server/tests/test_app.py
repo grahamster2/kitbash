@@ -1,0 +1,422 @@
+"""HTTP surface, driven through FastAPI's TestClient with generation stubbed."""
+import json
+from pathlib import Path
+
+import pytest
+
+import jobs
+from conftest import PNG_B64
+
+
+def test_health_answers_on_a_machine_with_no_cuda(client):
+    body = client.get("/health").json()
+
+    assert body["status"] == "ok"
+    assert body["model_loaded"] is False
+    assert body["gpu"] is None
+    assert body["queue_depth"] == 0 and body["running"] == []
+
+
+def test_post_jobs_queues_the_work_and_returns_its_id(client):
+    body = client.post("/jobs", json={"image_b64": PNG_B64}).json()
+
+    assert body["status"] == jobs.QUEUED
+    assert client.get("/health").json()["queue_depth"] == 1
+    assert client.get(f"/jobs/{body['id']}").json()["id"] == body["id"]
+
+
+def test_post_jobs_forwards_only_the_params_the_caller_set(client):
+    body = client.post(
+        "/jobs", json={"image_b64": PNG_B64, "seed": 5, "target_faces": 8000}
+    ).json()
+
+    assert body["params"] == {"seed": 5, "target_faces": 8000}
+
+
+def test_post_jobs_defaults_to_no_params(client):
+    body = client.post("/jobs", json={"image_b64": PNG_B64}).json()
+
+    assert body["params"] == {}
+
+
+def test_post_jobs_requires_an_image(client):
+    assert client.post("/jobs", json={"part_name": "hull"}).status_code == 422
+
+
+def test_post_jobs_never_echoes_the_image_back(client):
+    response = client.post("/jobs", json={"image_b64": PNG_B64})
+
+    assert PNG_B64 not in response.text
+    assert "image_b64" not in response.json()
+
+
+def test_get_jobs_lists_newest_first(client):
+    first = client.post("/jobs", json={"image_b64": PNG_B64}).json()["id"]
+    second = client.post("/jobs", json={"image_b64": PNG_B64}).json()["id"]
+
+    listed = client.get("/jobs").json()["jobs"]
+
+    assert [j["id"] for j in listed] == [second, first]
+
+
+def test_get_jobs_honours_the_limit(client):
+    for _ in range(3):
+        client.post("/jobs", json={"image_b64": PNG_B64})
+
+    assert len(client.get("/jobs", params={"limit": 2}).json()["jobs"]) == 2
+    assert client.get("/jobs", params={"limit": 0}).json()["jobs"] == []
+
+
+def test_get_job_404s_for_an_unknown_id(client):
+    response = client.get("/jobs/nosuchjob123")
+
+    assert response.status_code == 404
+    assert "nosuchjob123" in response.json()["detail"]
+
+
+def test_get_job_returns_the_finished_record(client, finished_job):
+    job_id = finished_job()
+
+    body = client.get(f"/jobs/{job_id}").json()
+
+    assert body["status"] == jobs.DONE
+    assert body["result"]["faces"] == 12
+
+
+def test_get_mesh_serves_the_glb(client, finished_job):
+    job_id = finished_job()
+
+    response = client.get(f"/jobs/{job_id}/mesh")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "model/gltf-binary"
+    assert response.content[:4] == b"glTF"
+
+
+def test_get_mesh_409s_while_the_job_is_unfinished(client):
+    job_id = client.post("/jobs", json={"image_b64": PNG_B64}).json()["id"]
+
+    response = client.get(f"/jobs/{job_id}/mesh")
+
+    assert response.status_code == 409
+    assert "queued" in response.json()["detail"]
+
+
+def test_get_mesh_404s_for_an_unknown_job(client):
+    assert client.get("/jobs/nosuchjob123/mesh").status_code == 404
+
+
+def test_describe_reports_the_part_size(client, finished_job):
+    job_id = finished_job()
+
+    body = client.get(f"/jobs/{job_id}/describe").json()
+
+    assert body["size"] == [1.0, 2.0, 3.0]
+    assert body["faces"] == 12
+
+
+def test_describe_404s_and_409s_like_the_mesh_endpoint(client):
+    queued = client.post("/jobs", json={"image_b64": PNG_B64}).json()["id"]
+
+    assert client.get("/jobs/nosuchjob123/describe").status_code == 404
+    assert client.get(f"/jobs/{queued}/describe").status_code == 409
+
+
+def test_assemble_composes_finished_parts_into_one_scene(client, finished_job, out_dir):
+    hull, wing = finished_job("hull"), finished_job("wing")
+
+    body = client.post(
+        "/assemble",
+        json={
+            "scene_name": "plane",
+            "parts": [
+                {"job_id": hull, "name": "hull"},
+                {"job_id": wing, "name": "wing", "position": [10, 0, 0]},
+            ],
+        },
+    ).json()
+
+    assert body["part_count"] == 2
+    assert [p["name"] for p in body["parts"]] == ["hull", "wing"]
+    assert body["size"] == [11.0, 2.0, 3.0]
+    assert body["scene_path"] == str(
+        out_dir / "scenes" / body["scene_id"] / "plane.glb"
+    )
+    assert Path(body["scene_path"]).is_file()
+
+
+def test_assemble_defaults_the_scene_filename(client, finished_job):
+    job_id = finished_job()
+
+    body = client.post(
+        "/assemble", json={"parts": [{"job_id": job_id, "name": "hull"}]}
+    ).json()
+
+    assert body["scene_path"].endswith("scene.glb")
+
+
+def test_assemble_rejects_an_empty_part_list(client):
+    response = client.post("/assemble", json={"parts": []})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "no parts given"
+
+
+def test_assemble_404s_when_a_part_job_does_not_exist(client):
+    response = client.post(
+        "/assemble", json={"parts": [{"job_id": "nosuchjob123", "name": "hull"}]}
+    )
+
+    assert response.status_code == 404
+
+
+def test_assemble_409s_when_a_part_job_is_unfinished(client):
+    queued = client.post("/jobs", json={"image_b64": PNG_B64}).json()["id"]
+
+    response = client.post(
+        "/assemble", json={"parts": [{"job_id": queued, "name": "hull"}]}
+    )
+
+    assert response.status_code == 409
+
+
+def test_assemble_404s_when_use_raw_has_no_dense_original(client, finished_job):
+    job_id = finished_job()
+
+    response = client.post(
+        "/assemble",
+        json={"parts": [{"job_id": job_id, "name": "hull", "use_raw": True}]},
+    )
+
+    assert response.status_code == 404
+    assert "mesh_raw.glb" in response.json()["detail"]
+
+
+def test_assemble_uses_the_dense_original_when_asked(client, finished_job, out_dir):
+    job_id = finished_job()
+    mesh = out_dir / job_id / "mesh.glb"
+    (out_dir / job_id / "mesh_raw.glb").write_bytes(mesh.read_bytes())
+
+    body = client.post(
+        "/assemble",
+        json={"parts": [{"job_id": job_id, "name": "hull", "use_raw": True}]},
+    ).json()
+
+    assert body["parts"][0]["source"].endswith("mesh_raw.glb")
+
+
+def test_assemble_400s_when_a_part_mesh_has_gone_missing(client, finished_job, out_dir):
+    job_id = finished_job()
+    (out_dir / job_id / "mesh.glb").unlink()
+
+    response = client.post(
+        "/assemble", json={"parts": [{"job_id": job_id, "name": "hull"}]}
+    )
+
+    assert response.status_code == 400
+    assert "part mesh missing" in response.json()["detail"]
+
+
+def test_get_scene_serves_the_assembled_glb(client, finished_job):
+    job_id = finished_job()
+    scene_id = client.post(
+        "/assemble", json={"parts": [{"job_id": job_id, "name": "hull"}]}
+    ).json()["scene_id"]
+
+    response = client.get(f"/scenes/{scene_id}/mesh")
+
+    assert response.status_code == 200
+    assert response.content[:4] == b"glTF"
+
+
+def test_get_scene_404s_for_an_unknown_scene(client):
+    assert client.get("/scenes/nosuchscene/mesh").status_code == 404
+
+
+def test_export_requires_exactly_one_of_job_id_or_scene_id(client, finished_job):
+    job_id = finished_job()
+
+    assert client.post("/export", json={"target": "roblox"}).status_code == 400
+    both = client.post(
+        "/export", json={"job_id": job_id, "scene_id": "abc", "target": "roblox"}
+    )
+    assert both.status_code == 400
+    assert "exactly one" in both.json()["detail"]
+
+
+def test_export_writes_the_target_files_under_the_job_directory(
+    client, finished_job, out_dir
+):
+    job_id = finished_job()
+
+    body = client.post("/export", json={"job_id": job_id, "target": "roblox"}).json()
+
+    assert body["primary"] == str(out_dir / job_id / "export" / "roblox" / "mesh.glb")
+    assert Path(body["primary"]).is_file()
+    assert body["pivot"] == "base-centered"
+
+
+def test_export_applies_height_studs(client, finished_job):
+    job_id = finished_job()
+
+    body = client.post(
+        "/export", json={"job_id": job_id, "target": "roblox", "height_studs": 12}
+    ).json()
+
+    assert body["size"][1] == 12.0
+
+
+def test_export_rejects_an_unknown_target(client, finished_job):
+    job_id = finished_job()
+
+    response = client.post("/export", json={"job_id": job_id, "target": "unity"})
+
+    assert response.status_code == 400
+    assert "unknown target" in response.json()["detail"]
+
+
+def test_export_404s_and_409s_on_the_job_it_is_given(client):
+    queued = client.post("/jobs", json={"image_b64": PNG_B64}).json()["id"]
+
+    assert client.post("/export", json={"job_id": "nosuchjob123"}).status_code == 404
+    assert client.post("/export", json={"job_id": queued}).status_code == 409
+
+
+def test_export_404s_for_an_unknown_scene(client):
+    assert client.post("/export", json={"scene_id": "nosuchscene"}).status_code == 404
+
+
+def test_export_writes_a_scene_export_beside_the_scene(client, finished_job, out_dir):
+    job_id = finished_job()
+    scene_id = client.post(
+        "/assemble", json={"parts": [{"job_id": job_id, "name": "hull"}]}
+    ).json()["scene_id"]
+
+    body = client.post("/export", json={"scene_id": scene_id, "target": "dcc"}).json()
+
+    assert body["primary"].startswith(str(out_dir / "scenes" / scene_id / "export"))
+    assert Path(body["primary"]).is_file()
+
+
+def test_export_file_serves_a_file_inside_the_output_directory(
+    client, finished_job, out_dir
+):
+    job_id = finished_job()
+    primary = client.post(
+        "/export", json={"job_id": job_id, "target": "roblox"}
+    ).json()["primary"]
+
+    response = client.get("/export/file", params={"path": primary})
+
+    assert response.status_code == 200
+    assert response.content == Path(primary).read_bytes()
+
+
+def test_export_file_404s_for_a_missing_file_inside_the_output_directory(
+    client, out_dir
+):
+    response = client.get("/export/file", params={"path": str(out_dir / "nope.glb")})
+
+    assert response.status_code == 404
+
+
+def test_export_file_404s_for_a_directory(client, out_dir):
+    response = client.get("/export/file", params={"path": str(out_dir)})
+
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize("path", ["/etc/passwd", "/etc/hostname"])
+def test_export_file_refuses_an_absolute_path_outside_the_output_directory(
+    client, path
+):
+    response = client.get("/export/file", params={"path": path})
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "path is outside the output directory"
+
+
+def test_export_file_refuses_a_path_that_climbs_out_of_the_output_directory(
+    client, out_dir, tmp_path
+):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("private")
+
+    response = client.get(
+        "/export/file", params={"path": str(out_dir / ".." / "secret.txt")}
+    )
+
+    assert response.status_code == 403
+
+
+def test_export_file_refuses_a_symlink_that_points_outside(client, out_dir, tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("private")
+    link = out_dir / "innocent.glb"
+    link.symlink_to(secret)
+
+    response = client.get("/export/file", params={"path": str(link)})
+
+    assert response.status_code == 403
+
+
+def test_export_file_refuses_a_sibling_directory_sharing_the_prefix(client, tmp_path):
+    evil = tmp_path / "out-evil"
+    evil.mkdir()
+    (evil / "loot.glb").write_text("loot")
+
+    response = client.get("/export/file", params={"path": str(evil / "loot.glb")})
+
+    assert response.status_code == 403
+
+
+def test_scene_ids_cannot_climb_out_of_the_output_directory(client, tmp_path):
+    """/scenes globs a caller-named directory, so it must not accept a path."""
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    (secret / "loot.glb").write_bytes(b"glTFloot")
+
+    for scene_id in ("../secret", "..%2F..%2Fsecret"):
+        response = client.get(f"/scenes/{scene_id}/mesh")
+        assert response.status_code == 404
+        assert b"loot" not in response.content
+
+
+def test_unload_reports_the_model_is_gone(client):
+    body = client.post("/admin/unload").json()
+
+    assert body == {"model_loaded": False, "gpu": None}
+
+
+def test_startup_creates_the_output_directory_and_rehydrates(monkeypatch, tmp_path):
+    """The startup hook is what makes results survive a restart."""
+    from fastapi.testclient import TestClient
+
+    import app
+    import config
+    from conftest import write_job_json
+
+    fresh = tmp_path / "restarted"
+    monkeypatch.setattr(config, "OUT_DIR", fresh)
+    monkeypatch.setattr(jobs, "start_worker", lambda: None)
+    fresh.mkdir()
+    write_job_json(fresh, "survivor1234", jobs.DONE, created_at=1.0)
+    write_job_json(fresh, "inflight1234", jobs.RUNNING, created_at=2.0)
+
+    with TestClient(app.api) as c:
+        listed = c.get("/jobs").json()["jobs"]
+
+    assert fresh.is_dir()
+    assert {j["id"]: j["status"] for j in listed} == {
+        "survivor1234": jobs.DONE,
+        "inflight1234": jobs.ERROR,
+    }
+
+
+def test_job_records_on_disk_never_contain_the_image(client, finished_job, out_dir):
+    job_id = finished_job()
+
+    raw = (out_dir / job_id / "job.json").read_text()
+
+    assert PNG_B64 not in raw
+    assert "image" not in json.loads(raw)

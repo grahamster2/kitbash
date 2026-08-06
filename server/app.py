@@ -9,6 +9,7 @@ Run:  python -m uvicorn app:api --host 0.0.0.0 --port 8188
 import logging
 import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -29,15 +30,16 @@ log = logging.getLogger("kitbash.app")
 
 STARTED_AT = time.time()
 
-api = FastAPI(title="Kitbash GPU server", version="0.1.0")
-
-
-@api.on_event("startup")
-def _startup():
+@asynccontextmanager
+async def _lifespan(_: FastAPI):
     config.OUT_DIR.mkdir(parents=True, exist_ok=True)
     jobs.rehydrate()
     jobs.start_worker()
     log.info("listening; outputs -> %s", config.OUT_DIR)
+    yield
+
+
+api = FastAPI(title="Kitbash GPU server", version="0.1.0", lifespan=_lifespan)
 
 
 class GenerateRequest(BaseModel):

@@ -105,6 +105,9 @@ def get(job_id: str) -> dict | None:
 
 
 def listing(limit: int = 50) -> list[dict]:
+    if limit <= 0:
+        # [-0:] is the whole list, so ?limit=0 would return everything.
+        return []
     with _jobs_lock:
         return [dict(j) for j in list(_jobs.values())[-limit:]][::-1]
 
@@ -174,6 +177,10 @@ def rehydrate():
         if job.get("status") in (QUEUED, RUNNING):
             job["status"] = ERROR
             job["error"] = "server restarted while this job was in flight"
+            # Write the correction back, or job.json still says "running" and
+            # get() reads that stale status straight back off disk once this
+            # job is evicted from memory.
+            _persist(job)
         found.append(job)
 
     found.sort(key=lambda j: j.get("created_at") or 0)
