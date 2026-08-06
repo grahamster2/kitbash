@@ -24,20 +24,23 @@ Usable VRAM, not nominal.
 | Usable VRAM | Shape generation | Textures | Notes |
 | --- | --- | --- | --- |
 | < 4 GB | Offload forks only | No | Painful. Consider pointing at a remote GPU instead. |
-| 4-6 GB | TRELLIS 2 only | Marginal | Shape fits at 3.93 GiB; the texture bake needs ~5 GiB. |
-| 6-9 GB | Yes | **Yes, via TRELLIS 2** | The measured reference case. Hunyuan3D geometry fits; its texture stage does not. |
-| 9 GB+ | Yes | Yes | Comfortable either way. |
+| 4-6 GB | TRELLIS 2 only | No | Geometry fits at ~3.6 GiB. |
+| 6-9 GB | Yes | No | The measured reference case. Both models fit; neither produces usable textures. |
+| 9 GB+ | Yes | Unproven | Comfortable for geometry. Nothing here has produced a texture worth shipping. |
 | No NVIDIA GPU | — | — | Use remote mode against another machine. |
 
-**Measured**, not estimated, on an RTX 3080 with 8.88 GiB usable:
+**Measured**, not estimated, on an RTX 3080 with 8.88 GiB usable. Device-wide peaks, which include a ~1.12 GiB idle baseline:
 
 | | Time | Peak VRAM | Output |
 | --- | --- | --- | --- |
-| Hunyuan3D 2.1 | 40.4 s | 7.63 GiB | Geometry only |
-| TRELLIS 2 GGUF, shape only | 21.5 s | 3.93 GiB | Geometry only |
-| TRELLIS 2 GGUF, shape + PBR | ~100 s | 5.08 GiB | Geometry + real PBR textures |
+| Hunyuan3D 2.1 | 41-43 s | 9.27-9.34 GiB | Geometry only |
+| TRELLIS 2 GGUF (Q6_K, 512) | 79-151 s | 3.58-6.88 GiB | Better geometry; **texture output failed** |
 
-**"Textures need 12–16 GB" is a fact about Hunyuan3D, not about your card.** TRELLIS 2 bakes real PBR in less VRAM than Hunyuan3D uses for geometry alone, because its three DiTs load sequentially. Details and the quantization comparison are in [TRELLIS2-EVAL.md](TRELLIS2-EVAL.md).
+**Textures remain unsolved on this class of card.** Hunyuan3D's texture stage wants 12-16 GB and does not fit. TRELLIS 2 *fits* a texture bake in budget but produced rainbow noise on all three test props — see [QUALITY-COMPARISON.md](QUALITY-COMPARISON.md). Until that is root-caused, parts carry semantic materials instead.
+
+Note the VRAM asymmetry: Hunyuan3D uses ~92% of the budget, TRELLIS 2 about 28% on two of three subjects. Cost scales with **occupied volume**, so a solid crate is far more expensive than an equally-sized creature that is mostly empty space.
+
+Drop `octree_resolution` to 128 on Hunyuan3D if you are near the edge.
 
 Drop `octree_resolution` to 128 on Hunyuan3D if you are near the edge.
 

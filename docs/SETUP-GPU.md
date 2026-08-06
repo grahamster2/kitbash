@@ -66,7 +66,7 @@ No CUDA toolkit and no MSVC build tools required — PyTorch ships its own CUDA 
 
 **Hunyuan3D's** texture stage needs 12-16 GB and is out of reach on a 3080 without heavy offloading. Shape generation fits comfortably.
 
-That limit is Hunyuan3D's, not the card's: TRELLIS 2 GGUF bakes real PBR at a 5.08 GiB peak on the same GPU — see [TRELLIS2-EVAL.md](TRELLIS2-EVAL.md).
+TRELLIS 2 GGUF *fits* a texture bake on the same card, so the ceiling is Hunyuan3D's rather than the GPU's — but the textures it produced were rainbow noise on every hard-surface prop tested, so this is not yet a way to get textures. See [QUALITY-COMPARISON.md](QUALITY-COMPARISON.md).
 
 If you need that last gigabyte back and your CPU has integrated graphics, driving the displays from the iGPU frees the 3080 entirely.
 

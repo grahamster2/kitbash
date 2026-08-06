@@ -45,7 +45,7 @@ Every number below is measured on the reference hardware: an RTX 3080 with 10 GB
 
 **Not built yet:** there is no text-to-image stage. The pipeline is image-conditioned end to end, so today the caller supplies the reference image. Generations carry semantic materials rather than generated textures — Hunyuan3D's texture stage wants 12–16 GB and does not fit. The desktop app can submit and view single parts but cannot assemble or export; those run through MCP.
 
-**Measured but not yet integrated:** TRELLIS 2 (GGUF) produces shape *and* real PBR textures in ~100 s at a **5.08 GiB** peak on the same card — less VRAM than Hunyuan3D needs for geometry alone, and it does geometry alone in 21.5 s at 3.93 GiB. Textures being out of reach turns out to be a fact about Hunyuan3D, not about 10 GB cards. See [TRELLIS2-EVAL.md](docs/TRELLIS2-EVAL.md).
+**Measured but not yet integrated:** TRELLIS 2 (GGUF) produces visibly better geometry on hard-surface props at roughly 40% of the VRAM — sharp crate corners, a rectangular sword cross-guard where Hunyuan3D makes a dowel. Its **texture output failed on all three test props** (rainbow noise, confirmed in the baked atlas), and it is slower than Hunyuan3D on solid objects. Side-by-side renders and numbers in [QUALITY-COMPARISON.md](docs/QUALITY-COMPARISON.md); the earlier single-subject benchmark it corrects is [TRELLIS2-EVAL.md](docs/TRELLIS2-EVAL.md).
 
 ## Quickstart
 
