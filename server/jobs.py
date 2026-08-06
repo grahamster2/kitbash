@@ -201,7 +201,10 @@ def _back_project(image_b64: str, result: dict, params: dict) -> dict:
             "texture_seconds": round(time.time() - t0, 1),
             # Surfaced so a caller can fall back to semantic materials rather
             # than ship a mesh painted from a pose that never fitted.
-            "silhouette_iou": round(float(stats.get("silhouette_iou", 0.0)), 3),
+            # Nested: the fit belongs to the camera, not to the paint pass.
+            "silhouette_iou": round(
+                float((stats.get("camera") or {}).get("silhouette_iou", 0.0)), 3
+            ),
             "texture_coverage": round(float(stats.get("coverage", 0.0)), 3),
             "file_bytes": mesh_path.stat().st_size,
         }
