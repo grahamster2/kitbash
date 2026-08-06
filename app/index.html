@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <title>Kitbash</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <header id="brand">
+          <h1>Kitbash</h1>
+          <span id="server-status" class="pill">connecting</span>
+        </header>
+
+        <section class="panel">
+          <label class="field">
+            <span>Server</span>
+            <input id="base-url" type="text" spellcheck="false" placeholder="http://127.0.0.1:8188" />
+          </label>
+          <p id="server-detail" class="detail">—</p>
+        </section>
+
+        <section class="panel">
+          <h2>New part</h2>
+          <label id="drop" class="drop">
+            <input id="image-input" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+            <img id="image-preview" alt="" hidden />
+            <span id="drop-label">Drop a reference image, or click to choose</span>
+          </label>
+          <div class="grid-2">
+            <label class="field">
+              <span>Part name</span>
+              <input id="part-name" type="text" placeholder="fuselage" />
+            </label>
+            <label class="field">
+              <span>Seed</span>
+              <input id="seed" type="number" placeholder="random" />
+            </label>
+          </div>
+          <label class="field">
+            <span>Target faces</span>
+            <input id="target-faces" type="number" value="8000" min="500" step="500" />
+          </label>
+          <button id="generate" type="button" disabled>Generate</button>
+          <p id="submit-status" class="detail"></p>
+        </section>
+
+        <section class="panel grow">
+          <h2>
+            Jobs
+            <button id="refresh" class="ghost" type="button" title="Refresh">↻</button>
+          </h2>
+          <ul id="job-list"></ul>
+        </section>
+      </aside>
+
+      <main id="stage">
+        <div id="viewport"></div>
+        <div id="hud">
+          <span id="hud-title">No part loaded</span>
+          <span id="hud-stats" class="detail"></span>
+        </div>
+        <div id="view-tools">
+          <button id="toggle-wireframe" class="ghost" type="button">Wireframe</button>
+          <button id="toggle-rotate" class="ghost" type="button">Spin</button>
+        </div>
+        <p id="viewport-error" hidden></p>
+      </main>
+    </div>
+  </body>
+</html>
