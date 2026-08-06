@@ -64,7 +64,9 @@ No CUDA toolkit and no MSVC build tools required — PyTorch ships its own CUDA 
 
 `nvidia-smi` reporting 10240 MiB is misleading; the Windows desktop holds ~1 GB, leaving **~8.9 GiB usable**. Budget against the real number.
 
-Textures need 12-16 GB and are out of reach on a 3080 without heavy offloading. Shape generation fits comfortably.
+**Hunyuan3D's** texture stage needs 12-16 GB and is out of reach on a 3080 without heavy offloading. Shape generation fits comfortably.
+
+That limit is Hunyuan3D's, not the card's: TRELLIS 2 GGUF bakes real PBR at a 5.08 GiB peak on the same GPU — see [TRELLIS2-EVAL.md](TRELLIS2-EVAL.md).
 
 If you need that last gigabyte back and your CPU has integrated graphics, driving the displays from the iGPU frees the 3080 entirely.
 

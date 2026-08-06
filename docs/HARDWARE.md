@@ -23,15 +23,23 @@ Usable VRAM, not nominal.
 
 | Usable VRAM | Shape generation | Textures | Notes |
 | --- | --- | --- | --- |
-| < 6 GB | Offload forks only | No | Painful. Consider pointing at a remote GPU instead. |
-| 6-9 GB | Yes | No | Untextured meshes. This is the measured reference case — see below. |
-| 9-12 GB | Yes | No | Shape generation is comfortable. The PBR stage still does not fit. |
-| 16 GB+ | Yes | Yes | Full pipeline, no compromises. |
+| < 4 GB | Offload forks only | No | Painful. Consider pointing at a remote GPU instead. |
+| 4-6 GB | TRELLIS 2 only | Marginal | Shape fits at 3.93 GiB; the texture bake needs ~5 GiB. |
+| 6-9 GB | Yes | **Yes, via TRELLIS 2** | The measured reference case. Hunyuan3D geometry fits; its texture stage does not. |
+| 9 GB+ | Yes | Yes | Comfortable either way. |
 | No NVIDIA GPU | — | — | Use remote mode against another machine. |
 
-**Measured**, not estimated: Hunyuan3D 2.1 shape generation peaks at **7.63 GiB** at `octree_resolution=256` and takes 40.4 s warm. Its PBR texture stage wants 12–16 GB and is out of reach below that — an RTX 3080 does not get textures, however the marketing number reads. Drop `octree_resolution` to 128 if you are near the edge.
+**Measured**, not estimated, on an RTX 3080 with 8.88 GiB usable:
 
-TRELLIS 2 officially asks for 24 GB; GGUF quantization reportedly brings that to ~6 GB at Q4 and ~9 GB at Q8, with textures and UVs included. That is unverified here — see [TRELLIS2-EVAL.md](TRELLIS2-EVAL.md) if it exists.
+| | Time | Peak VRAM | Output |
+| --- | --- | --- | --- |
+| Hunyuan3D 2.1 | 40.4 s | 7.63 GiB | Geometry only |
+| TRELLIS 2 GGUF, shape only | 21.5 s | 3.93 GiB | Geometry only |
+| TRELLIS 2 GGUF, shape + PBR | ~100 s | 5.08 GiB | Geometry + real PBR textures |
+
+**"Textures need 12–16 GB" is a fact about Hunyuan3D, not about your card.** TRELLIS 2 bakes real PBR in less VRAM than Hunyuan3D uses for geometry alone, because its three DiTs load sequentially. Details and the quantization comparison are in [TRELLIS2-EVAL.md](TRELLIS2-EVAL.md).
+
+Drop `octree_resolution` to 128 on Hunyuan3D if you are near the edge.
 
 If you need the last gigabyte and your CPU has integrated graphics, driving the displays from the iGPU frees the discrete card entirely.
 

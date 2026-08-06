@@ -39,9 +39,13 @@ Every number below is measured on the reference hardware: an RTX 3080 with 10 GB
 | Roblox export | `.glb` imports natively. The 20,000-triangle cap is **per mesh**, so a 10-part model has a 200k budget while one welded blob is rejected |
 | Availability | Server runs as a Windows scheduled task at boot as SYSTEM — verified launching **16 s after boot**, no login |
 | Exposure | Port 8188 is firewalled to `100.64.0.0/10`, the Tailscale CGNAT range. Not reachable from the LAN or the internet |
+| Materials | Each part gets a PBR material inferred from its name — `canopy` → glass, `wheel` → rubber, `engine` → metal. No VRAM, ~1 ms |
 | Agent interface | 8 MCP tools, registered and connected in Claude Code |
+| Tests | 120, CPU-only, ~1 s |
 
-**Not built yet:** there is no text-to-image stage. The pipeline is image-conditioned end to end, so today the caller supplies the reference image. Textures are out of reach on a 10 GB card (the PBR stage wants 12–16 GB) and generations are untextured grey geometry. The desktop app can submit and view single parts but cannot assemble or export — those run through MCP.
+**Not built yet:** there is no text-to-image stage. The pipeline is image-conditioned end to end, so today the caller supplies the reference image. Generations carry semantic materials rather than generated textures — Hunyuan3D's texture stage wants 12–16 GB and does not fit. The desktop app can submit and view single parts but cannot assemble or export; those run through MCP.
+
+**Measured but not yet integrated:** TRELLIS 2 (GGUF) produces shape *and* real PBR textures in ~100 s at a **5.08 GiB** peak on the same card — less VRAM than Hunyuan3D needs for geometry alone, and it does geometry alone in 21.5 s at 3.93 GiB. Textures being out of reach turns out to be a fact about Hunyuan3D, not about 10 GB cards. See [TRELLIS2-EVAL.md](docs/TRELLIS2-EVAL.md).
 
 ## Quickstart
 
