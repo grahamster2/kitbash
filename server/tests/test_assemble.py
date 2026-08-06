@@ -173,6 +173,13 @@ def test_assemble_records_the_source_mesh_of_each_part(make_mesh, tmp_path):
         "faces": 12,
         "material": "paint",
         "source": str(path),
+        "anchored_to": None,
+        "mirrored_from": None,
+        "position": [0.0, 0.0, 0.0],
+        "bounds_min": [-0.5, -0.5, -0.5],
+        "bounds_max": [0.5, 0.5, 0.5],
+        "size": [1.0, 1.0, 1.0],
+        "center": [0.0, 0.0, 0.0],
     }
     assert result["scene_path"] == str(tmp_path / "scene.glb")
 

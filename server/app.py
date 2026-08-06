@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 import assemble as assembly
 import config
+import decompose
 import export
 import imagegen
 import jobs
@@ -325,12 +326,82 @@ def _record(job: dict):
     jobs._persist(job)
 
 
+class Anchor(BaseModel):
+    """Place a part against another part instead of at a coordinate.
+
+    The server measures the target's *placed* bounds — after its own scale,
+    rotation and anchor — so the caller never has to know what a part's mesh
+    measures on disk. That is the whole point: a part scaled 0.05 occupies a
+    twentieth of its file bounds, and guessing from the file is the bug.
+    """
+
+    to: str = Field(
+        ...,
+        description=(
+            "The part name to measure against, or 'ground' for the y=0 plane. "
+            "The target may itself be anchored; order in the list does not "
+            "matter, and a cycle is an error rather than a hang."
+        ),
+    )
+    align: dict[str, float | str] | None = Field(
+        None,
+        description=(
+            "Per axis, where on the TARGET this part goes. A number is a "
+            "fraction of the target's box (0 = low face, 0.2 = a fifth along, "
+            f"1 = high face); or one of {sorted(set(assembly.FRACTIONS))}. "
+            f"The attachment keywords {sorted(set(assembly.ATTACH))} also set "
+            "the matching point on this part, so 'under' means this part's top "
+            "face meets the target's bottom face. Axes left out fall through to "
+            "`position`. Omit `align` entirely to centre this part inside the "
+            "target."
+        ),
+    )
+    my: dict[str, float | str] | None = Field(
+        None,
+        description=(
+            "Per axis, which point of THIS part lands on that spot. Same "
+            "vocabulary as `align`. Defaults to the part's centre, so "
+            "align {'y': 'min'} hangs this part's centre off the target's "
+            "bottom face and my {'y': 'max'} makes them touch instead."
+        ),
+    )
+    offset: list[float] | None = Field(
+        None, description="[x, y, z] in world units, added after alignment."
+    )
+
+
 class PartPlacement(BaseModel):
     job_id: str = Field(..., description="A completed image_to_3d or primitive job")
     name: str = Field(..., description="glTF node name for this part")
-    position: list[float] | None = Field(None, description="[x, y, z]")
+    position: list[float] | None = Field(
+        None,
+        description=(
+            "[x, y, z]. With an anchor, this supplies only the axes the anchor "
+            "does not constrain."
+        ),
+    )
     rotation: list[float] | None = Field(None, description="[rx, ry, rz] in degrees")
     scale: float | list[float] | None = None
+    anchor: Anchor | None = Field(
+        None, description="Place this part relative to another part or the ground."
+    )
+    mirror: str | None = Field(
+        None,
+        description=(
+            "Reflect this part's placement across the world plane 'x', 'y' or "
+            "'z' = 0. Face winding is corrected, so a mirrored part is not "
+            "inside-out."
+        ),
+    )
+    mirror_of: str | None = Field(
+        None,
+        description=(
+            "This part is another part reflected — the left/right pair of a "
+            "gear leg or a wing. It takes that part's whole transform, so it "
+            "cannot also set position or anchor, and placing the original "
+            "correctly places both."
+        ),
+    )
     material: str | None = Field(
         None,
         description=(
@@ -396,6 +467,12 @@ def assemble_scene(req: AssembleRequest):
             "position": p.position,
             "rotation": p.rotation,
             "scale": p.scale,
+            # exclude_none so an omitted `align` stays omitted: assemble reads
+            # "no align key" as "centre me inside the target", which is not the
+            # same request as an explicit null.
+            "anchor": p.anchor.model_dump(exclude_none=True) if p.anchor else None,
+            "mirror": p.mirror,
+            "mirror_of": p.mirror_of,
             # A scripted part already knows its material; falling back to
             # guessing from the node name would turn a wooden barrel into a
             # metal one, since "barrel" reads as gun barrel.
@@ -452,6 +529,26 @@ def get_image(image_id: str):
     if not path.exists():
         raise HTTPException(404, f"no such image: {image_id}")
     return FileResponse(path, media_type="image/png", filename=f"{image_id}.png")
+
+
+@api.post("/decompose")
+def run_decomposition(plan: dict):
+    """Build every part of a plan, and return an /assemble request for them.
+
+    Long-running — a plan is many image generations and many meshes. The parts
+    land in the job registry as they finish, so /jobs shows progress while this
+    is still open.
+    """
+    try:
+        return decompose.run(decompose.Plan.from_dict(plan))
+    except decompose.DecomposeError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@api.get("/decompose/examples")
+def decomposition_examples():
+    """Worked plans. This is how a coding agent learns the format."""
+    return {"examples": decompose.EXAMPLES}
 
 
 @api.get("/materials")
