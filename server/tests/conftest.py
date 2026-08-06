@@ -6,6 +6,7 @@ never at module scope — so the only thing that has to be faked is
 `generate_shape`, and it is faked for every test so a stray worker thread can
 never reach the GPU path.
 """
+import base64
 import itertools
 import json
 import os
@@ -40,6 +41,9 @@ PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
     "+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
 )
+
+# The same PNG as raw bytes, for the image store, which really does decode it.
+PNG_BYTES = base64.b64decode(PNG_B64)
 
 
 @pytest.fixture(autouse=True)

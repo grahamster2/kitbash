@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 import assemble as assembly
 import config
 import export
+import imagegen
 import jobs
 import materials
 import pipeline
@@ -44,7 +45,13 @@ api = FastAPI(title="Kitbash GPU server", version="0.1.0", lifespan=_lifespan)
 
 
 class GenerateRequest(BaseModel):
-    image_b64: str = Field(..., description="PNG/JPEG as base64, data URLs accepted")
+    image_b64: str | None = Field(
+        None, description="PNG/JPEG as base64, data URLs accepted"
+    )
+    # Reuse an image from POST /images. The same reference driving several parts
+    # is what makes an assembled object look like one object rather than a pile
+    # of separately-imagined pieces.
+    image_id: str | None = Field(None, description="An image from POST /images")
     octree_resolution: int | None = None
     num_inference_steps: int | None = None
     guidance_scale: float | None = None
@@ -83,7 +90,17 @@ def create_job(req: GenerateRequest):
         }.items()
         if v is not None
     }
-    return jobs.submit("image_to_3d", params, req.image_b64)
+    if bool(req.image_b64) == bool(req.image_id):
+        raise HTTPException(400, "give exactly one of image_b64 or image_id")
+
+    image_b64 = req.image_b64
+    if req.image_id:
+        try:
+            image_b64 = imagegen.load_b64(req.image_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    return jobs.submit("image_to_3d", params, image_b64)
 
 
 @api.get("/jobs")
@@ -191,6 +208,46 @@ def assemble_scene(req: AssembleRequest):
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"scene_id": scene_id, **result}
+
+
+class ImageRequest(BaseModel):
+    prompt: str = Field(..., description="What the object is, e.g. 'a wooden crate'")
+    provider: str | None = None
+    image_size: str = "square_hd"
+    seed: int | None = None
+    remove_background: bool = True
+
+
+@api.post("/images")
+def create_image(req: ImageRequest):
+    """Prompt -> reference image, stored for reuse across parts."""
+    try:
+        provider = imagegen.get_provider(req.provider)
+        raw = provider.generate(req.prompt, image_size=req.image_size, seed=req.seed)
+        image_id, path = imagegen.store(raw, req.remove_background)
+    except imagegen.ImageGenError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+    return {
+        "image_id": image_id,
+        "path": str(path),
+        "provider": provider.name,
+        "prompt": req.prompt,
+        "bytes": path.stat().st_size,
+    }
+
+
+@api.get("/images/providers")
+def image_providers():
+    return {"providers": imagegen.provider_status()}
+
+
+@api.get("/images/{image_id}")
+def get_image(image_id: str):
+    path = imagegen.image_path(image_id)
+    if not path.exists():
+        raise HTTPException(404, f"no such image: {image_id}")
+    return FileResponse(path, media_type="image/png", filename=f"{image_id}.png")
 
 
 @api.get("/materials")

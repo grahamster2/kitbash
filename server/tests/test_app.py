@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 import jobs
-from conftest import PNG_B64
+from conftest import PNG_B64, PNG_BYTES
 
 
 def test_health_answers_on_a_machine_with_no_cuda(client):
@@ -40,7 +40,30 @@ def test_post_jobs_defaults_to_no_params(client):
 
 
 def test_post_jobs_requires_an_image(client):
-    assert client.post("/jobs", json={"part_name": "hull"}).status_code == 422
+    response = client.post("/jobs", json={"part_name": "hull"})
+
+    assert response.status_code == 400
+    assert "exactly one" in response.json()["detail"]
+
+
+def test_post_jobs_rejects_both_an_image_and_an_image_id(client):
+    response = client.post("/jobs", json={"image_b64": PNG_B64, "image_id": "abc"})
+
+    assert response.status_code == 400
+
+
+def test_post_jobs_accepts_a_stored_image_id(client, out_dir):
+    import imagegen
+
+    image_id, _ = imagegen.store(PNG_BYTES, remove_background=False)
+
+    assert client.post("/jobs", json={"image_id": image_id}).status_code == 200
+
+
+def test_post_jobs_reports_an_unknown_image_id(client):
+    response = client.post("/jobs", json={"image_id": "missing12345"})
+
+    assert response.status_code == 404
 
 
 def test_post_jobs_never_echoes_the_image_back(client):
@@ -420,3 +443,53 @@ def test_job_records_on_disk_never_contain_the_image(client, finished_job, out_d
 
     assert PNG_B64 not in raw
     assert "image" not in json.loads(raw)
+
+
+def test_image_providers_reports_what_is_configured(client):
+    body = client.get("/images/providers").json()["providers"]
+
+    assert {p["name"] for p in body} == {"fal", "local"}
+    assert sum(p["selected"] for p in body) == 1
+
+
+def test_post_images_stores_the_result_and_serves_it_back(client, monkeypatch, out_dir):
+    import imagegen
+
+    monkeypatch.setattr(
+        imagegen.FalProvider, "generate", lambda self, prompt, **kw: PNG_BYTES
+    )
+    monkeypatch.setattr(imagegen.FalProvider, "available", lambda self: True)
+
+    body = client.post(
+        "/images", json={"prompt": "a wooden crate", "remove_background": False}
+    ).json()
+
+    assert body["provider"] == "fal"
+    served = client.get(f"/images/{body['image_id']}")
+    assert served.status_code == 200
+    assert served.headers["content-type"] == "image/png"
+
+
+def test_post_images_surfaces_a_provider_failure_as_502(client, monkeypatch):
+    import imagegen
+
+    def boom(self, prompt, **kw):
+        raise imagegen.ImageGenError("fal.ai rejected the API key (401)")
+
+    monkeypatch.setattr(imagegen.FalProvider, "generate", boom)
+
+    response = client.post("/images", json={"prompt": "a crate"})
+
+    assert response.status_code == 502
+    assert "API key" in response.json()["detail"]
+
+
+def test_post_images_rejects_an_unknown_provider(client):
+    response = client.post("/images", json={"prompt": "a crate", "provider": "dalle"})
+
+    assert response.status_code == 502
+    assert "unknown image provider" in response.json()["detail"]
+
+
+def test_get_image_404s_for_an_unknown_id(client):
+    assert client.get("/images/nosuchimage").status_code == 404

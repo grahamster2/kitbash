@@ -29,3 +29,14 @@ KEEP_MODEL_RESIDENT = os.environ.get("KITBASH_KEEP_RESIDENT", "1") != "0"
 
 # How many finished jobs to retain in memory before evicting the oldest.
 MAX_JOB_HISTORY = int(os.environ.get("KITBASH_MAX_JOB_HISTORY", "200"))
+
+# --- image generation -------------------------------------------------------
+# Which provider turns a prompt into a reference image. "fal" uses the user's
+# own fal.ai key and bills them directly; "local" is scaffolded. See imagegen.py.
+IMAGE_PROVIDER = os.environ.get("KITBASH_IMAGE_PROVIDER", "fal")
+
+# Read from the environment and never persisted — this is the user's key.
+FAL_KEY = os.environ.get("FAL_KEY") or os.environ.get("FAL_API_KEY")
+
+# schnell is the fast, cheap FLUX variant; reference images do not need dev.
+FAL_MODEL = os.environ.get("KITBASH_FAL_MODEL", "fal-ai/flux/schnell")
