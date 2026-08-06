@@ -466,3 +466,23 @@ def test_store_records_the_resolved_parameters_not_just_the_given_ones(tmp_path)
     assert result["params"]["kind"] == "crate"
     assert result["params"]["width"] == 3.0
     assert result["params"]["style"] == "planks"
+
+
+def test_the_part_name_beats_the_kinds_default_material():
+    """A bench called "front_left_seat" is a seat. The caller naming it that is
+    a stronger signal than the kind's assumption that benches are wooden."""
+    seat = primitives.build("bench", part_name="front_left_seat")
+
+    assert seat.visual.material.name == "kitbash_fabric"
+
+
+def test_the_kinds_default_applies_when_the_name_says_nothing():
+    anonymous = primitives.build("bench", part_name="thing_47")
+
+    assert anonymous.visual.material.name == f"kitbash_{primitives.KINDS['bench'].material}"
+
+
+def test_an_explicit_material_beats_both():
+    seat = primitives.build("bench", part_name="front_left_seat", material="gold")
+
+    assert seat.visual.material.name == "kitbash_gold"

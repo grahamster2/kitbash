@@ -949,6 +949,22 @@ def resolve(kind: str, params: dict | None) -> dict:
     }
 
 
+def _material_for(spec, part_name: str | None, explicit: str | None) -> str:
+    """Explicit choice, then the part name, then the kind's default.
+
+    The kind's default must not beat the name: a `bench` called
+    "front_left_seat" is a seat, and the caller naming it that is a stronger
+    signal than the kind's assumption that benches are wooden. The default is
+    only there for parts nobody bothered to name.
+    """
+    if explicit:
+        return explicit
+    family, _ = materials.resolve(part_name or "")
+    if family != materials.DEFAULT_MATERIAL:
+        return family
+    return spec.material
+
+
 def build(kind: str, params: dict | None = None, part_name: str | None = None,
           material: str | None = None, color: str | None = None,
           uv_scale: float | None = None) -> trimesh.Trimesh:
@@ -964,7 +980,7 @@ def build(kind: str, params: dict | None = None, part_name: str | None = None,
             f"(sections, plank_count, steps, ...)"
         )
 
-    materials.apply_to_mesh(mesh, part_name or kind, material or spec.material, color)
+    materials.apply_to_mesh(mesh, part_name or kind, _material_for(spec, part_name, material), color)
     if uv_scale:
         mesh.visual.uv = _unwrap(mesh, uv_scale)
     return mesh
