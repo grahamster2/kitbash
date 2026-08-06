@@ -70,6 +70,66 @@
         </div>
         <p id="viewport-error" hidden></p>
       </main>
+
+      <aside id="scenebar">
+        <section class="panel">
+          <h2>
+            Scene
+            <button id="clear-scene" class="ghost" type="button">Clear</button>
+          </h2>
+          <label class="field">
+            <span>Scene name</span>
+            <input id="scene-name" type="text" placeholder="scene" spellcheck="false" />
+          </label>
+          <p class="detail">
+            +Y is up, matching Roblox — placement carries over with no conversion.
+            Scale, then rotate (XYZ°), then translate.
+          </p>
+        </section>
+
+        <section class="panel grow">
+          <h2>
+            Parts
+            <span id="draft-count" class="detail"></span>
+          </h2>
+          <div id="draft-list"></div>
+          <p id="draft-empty" class="detail">Add finished jobs with the + on the job list.</p>
+        </section>
+
+        <section class="panel">
+          <button id="assemble" type="button" disabled>Assemble</button>
+          <p id="assemble-status" class="detail"></p>
+        </section>
+
+        <section class="panel" id="loaded-panel" hidden>
+          <h2>
+            In view
+            <button id="show-all" class="ghost" type="button">Show all</button>
+          </h2>
+          <ul id="loaded-parts"></ul>
+        </section>
+
+        <section class="panel">
+          <h2>Export</h2>
+          <div class="grid-2">
+            <label class="field">
+              <span>Target</span>
+              <select id="export-target">
+                <option value="roblox">Roblox</option>
+                <option value="dcc">DCC</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Height (studs)</span>
+              <input id="height-studs" type="number" placeholder="as-is" min="0.1" step="0.5" />
+            </label>
+          </div>
+          <button id="export" type="button" disabled>Export</button>
+          <p id="export-status" class="detail"></p>
+          <div id="export-warnings" hidden></div>
+          <ul id="export-files" hidden></ul>
+        </section>
+      </aside>
     </div>
   </body>
 </html>

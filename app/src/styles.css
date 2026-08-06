@@ -19,6 +19,12 @@
   box-sizing: border-box;
 }
 
+/* Panels and lists set `display`, which otherwise wins over the UA rule for
+   the `hidden` attribute and leaves hidden sections on screen. */
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   height: 100vh;
@@ -31,19 +37,32 @@ body {
 
 #app {
   display: grid;
-  grid-template-columns: 320px 1fr;
+  grid-template-columns: 300px 1fr 320px;
   height: 100vh;
 }
 
 /* ---------- sidebar ---------- */
 
-#sidebar {
+#sidebar,
+#scenebar {
   display: flex;
   flex-direction: column;
   gap: 1px;
   background: var(--line);
   border-right: 1px solid var(--line);
   overflow: hidden;
+}
+
+#scenebar {
+  border-right: none;
+  border-left: 1px solid var(--line);
+  overflow-y: auto;
+}
+
+/* The part list is where the work happens in this column; the panels below it
+   must not squeeze it to nothing once a scene is loaded. */
+#scenebar .panel.grow {
+  min-height: 150px;
 }
 
 #brand {
@@ -102,7 +121,8 @@ body {
 }
 
 input[type="text"],
-input[type="number"] {
+input[type="number"],
+select {
   width: 100%;
   padding: 7px 9px;
   border: 1px solid var(--line);
@@ -114,7 +134,8 @@ input[type="number"] {
   user-select: text;
 }
 
-input:focus {
+input:focus,
+select:focus {
   outline: none;
   border-color: var(--accent);
 }
@@ -335,4 +356,174 @@ button.ghost.on {
   background: rgba(30, 12, 12, 0.9);
   color: var(--err);
   font-size: 12px;
+}
+
+/* ---------- scene builder ---------- */
+
+.add-part {
+  padding: 0 6px;
+  line-height: 1.5;
+  flex: none;
+}
+
+.job:not(:hover) .add-part {
+  opacity: 0;
+}
+
+#draft-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.draft {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-2);
+}
+
+.draft-head {
+  display: flex;
+  gap: 6px;
+}
+
+.draft-head input {
+  font-size: 12.5px;
+  padding: 4px 7px;
+}
+
+.draft-head button {
+  flex: none;
+  padding: 2px 8px;
+}
+
+/* A transform row has to fit label + three numbers in a 320px column, so the
+   spinner arrows go and the fields shrink to what a coordinate needs. */
+.vec {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.vec > span:first-child {
+  width: 30px;
+  flex: none;
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.vec input[type="number"] {
+  min-width: 0;
+  padding: 3px 5px;
+  font-size: 12px;
+  text-align: right;
+  -moz-appearance: textfield;
+}
+
+.vec input[type="number"]::-webkit-outer-spin-button,
+.vec input[type="number"]::-webkit-inner-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.check input {
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+/* ---------- loaded parts ---------- */
+
+#loaded-parts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.loaded-part {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: var(--panel-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.loaded-part:hover {
+  border-color: var(--line);
+}
+
+.loaded-part.on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ---------- export ---------- */
+
+#export-warnings {
+  padding: 8px 10px;
+  border: 1px solid rgba(251, 191, 36, 0.4);
+  border-radius: 6px;
+  background: rgba(60, 44, 10, 0.5);
+  color: var(--warn);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+#export-warnings ul {
+  margin: 4px 0 0;
+  padding-left: 16px;
+}
+
+#export-files {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.export-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.export-file span:first-child {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.export-file .primary {
+  color: var(--accent);
 }

@@ -16,6 +16,9 @@ const JSON_TIMEOUT: Duration = Duration::from_secs(20);
 // A finished mesh is a few hundred KB, but it may be crossing a tailnet from a
 // machine that is also busy generating.
 const MESH_TIMEOUT: Duration = Duration::from_secs(120);
+// Assemble and export both do real mesh work on the server — loading every
+// source part, welding, and for Roblox decimating each mesh to the triangle cap.
+const WORK_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn client(timeout: Duration) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
@@ -54,6 +57,35 @@ async fn get_json(base: &str, path: &str) -> Result<Value, String> {
     serde_json::from_str(&body).map_err(|e| e.to_string())
 }
 
+async fn post_json(base: &str, path: &str, body: &Value, timeout: Duration) -> Result<Value, String> {
+    let res = client(timeout)?
+        .post(url(base, path))
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| unreachable(base, e))?;
+    let status = res.status();
+    let text = res.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("POST {path} -> {status}: {}", text.chars().take(300).collect::<String>()));
+    }
+    serde_json::from_str(&text).map_err(|e| e.to_string())
+}
+
+async fn get_bytes(base: &str, path: &str, timeout: Duration) -> Result<Vec<u8>, String> {
+    let res = client(timeout)?
+        .get(url(base, path))
+        .send()
+        .await
+        .map_err(|e| unreachable(base, e))?;
+    let status = res.status();
+    if !status.is_success() {
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!("{path} -> {status}: {}", body.chars().take(300).collect::<String>()));
+    }
+    res.bytes().await.map(|b| b.to_vec()).map_err(|e| e.to_string())
+}
+
 /// Seeds the server field on first run. Same env var the MCP server uses, so a
 /// machine that already knows where its GPU lives does not have to be told twice.
 #[tauri::command]
@@ -81,49 +113,88 @@ async fn get_job(base_url: String, id: String) -> Result<Value, String> {
 
 #[tauri::command]
 async fn submit_job(base_url: String, body: Value) -> Result<Value, String> {
-    let res = client(JSON_TIMEOUT)?
-        .post(url(&base_url, "/jobs"))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| unreachable(&base_url, e))?;
-    let status = res.status();
-    let text = res.text().await.map_err(|e| e.to_string())?;
-    if !status.is_success() {
-        return Err(format!("POST /jobs -> {status}: {}", text.chars().take(300).collect::<String>()));
-    }
-    serde_json::from_str(&text).map_err(|e| e.to_string())
+    post_json(&base_url, "/jobs", &body, JSON_TIMEOUT).await
+}
+
+/// Real bounds for a finished part, so placement in the scene builder is
+/// computed from measurements rather than guessed.
+#[tauri::command]
+async fn describe_job(base_url: String, id: String) -> Result<Value, String> {
+    get_json(&base_url, &format!("/jobs/{id}/describe")).await
+}
+
+#[tauri::command]
+async fn assemble(base_url: String, body: Value) -> Result<Value, String> {
+    post_json(&base_url, "/assemble", &body, WORK_TIMEOUT).await
+}
+
+/// Give exactly one of `job_id` / `scene_id` in `body`; the server rejects both.
+#[tauri::command]
+async fn export(base_url: String, body: Value) -> Result<Value, String> {
+    post_json(&base_url, "/export", &body, WORK_TIMEOUT).await
 }
 
 /// Returns raw GLB bytes. Tauri v2 hands `Response` to the webview as an
 /// ArrayBuffer, so the mesh never gets base64'd on its way to three.js.
 #[tauri::command]
 async fn fetch_mesh(base_url: String, id: String) -> Result<Response, String> {
-    let res = client(MESH_TIMEOUT)?
-        .get(url(&base_url, &format!("/jobs/{id}/mesh")))
-        .send()
+    get_bytes(&base_url, &format!("/jobs/{id}/mesh"), MESH_TIMEOUT)
         .await
-        .map_err(|e| unreachable(&base_url, e))?;
-    let status = res.status();
-    if !status.is_success() {
-        let body = res.text().await.unwrap_or_default();
-        return Err(format!("mesh {id} -> {status}: {}", body.chars().take(300).collect::<String>()));
+        .map(Response::new)
+}
+
+#[tauri::command]
+async fn fetch_scene(base_url: String, id: String) -> Result<Response, String> {
+    get_bytes(&base_url, &format!("/scenes/{id}/mesh"), MESH_TIMEOUT)
+        .await
+        .map(Response::new)
+}
+
+/// `path` is an absolute path *on the server* as returned by `/export`; the
+/// bytes land at `dest` on this machine. Written here rather than handed to the
+/// webview because an export is several files and the .obj runs to megabytes —
+/// no reason to move any of it through the IPC bridge.
+#[tauri::command]
+async fn download_exported_file(base_url: String, path: String, dest: String) -> Result<String, String> {
+    let encoded = urlencoding_component(&path);
+    let bytes = get_bytes(&base_url, &format!("/export/file?path={encoded}"), MESH_TIMEOUT).await?;
+    let dest = std::path::PathBuf::from(&dest);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
-    let bytes = res.bytes().await.map_err(|e| e.to_string())?;
-    Ok(Response::new(bytes.to_vec()))
+    std::fs::write(&dest, &bytes).map_err(|e| format!("{}: {e}", dest.display()))?;
+    Ok(dest.to_string_lossy().into_owned())
+}
+
+/// Export paths are Windows paths — backslashes, drive colons and spaces all
+/// have to survive the query string intact.
+fn urlencoding_component(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             default_base_url,
             health,
             list_jobs,
             get_job,
+            describe_job,
             submit_job,
-            fetch_mesh
+            assemble,
+            export,
+            fetch_mesh,
+            fetch_scene,
+            download_exported_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+

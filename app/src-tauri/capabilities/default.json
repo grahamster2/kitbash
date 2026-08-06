@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window. Server access is via this crate's own commands, so no HTTP-scope permissions are needed.",
+  "description": "Main window. Server access is via this crate's own commands, so no HTTP-scope permissions are needed; the dialog plugin only picks a save path, the write itself happens in Rust.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:allow-save"]
 }

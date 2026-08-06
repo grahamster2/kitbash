@@ -1,5 +1,5 @@
 /**
- * three.js viewport for a single generated part.
+ * three.js viewport for a generated part or an assembled multi-part scene.
  *
  * Meshes off the generator are untextured and often not watertight, so the
  * setup is tuned for reading *shape*: an environment map for form, a key light
@@ -17,6 +17,7 @@ import {
   Group,
   Mesh,
   MeshStandardMaterial,
+  Object3D,
   PMREMGenerator,
   PerspectiveCamera,
   Scene,
@@ -29,10 +30,23 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 
+export interface PartInfo {
+  name: string;
+  triangles: number;
+}
+
 export interface MeshStats {
   triangles: number;
   size: [number, number, number];
+  /** One entry per named top-level node — for an assembled scene, per part. */
+  parts: PartInfo[];
 }
+
+// Assembled scenes arrive with the server's own material, single parts with a
+// substituted grey, so a coloured tint would read differently per file and a
+// glow in the part's own colour vanishes on an already-saturated one. A neutral
+// lift washes any base colour toward white and is visible on all of them.
+const HIGHLIGHT_LIFT = 0.22;
 
 export class Viewport {
   private renderer: WebGLRenderer;
@@ -42,6 +56,7 @@ export class Viewport {
   private grid: GridHelper;
   private loader = new GLTFLoader();
   private current: Group | null = null;
+  private parts = new Map<string, Object3D>();
 
   constructor(private container: HTMLElement) {
     this.renderer = new WebGLRenderer({ antialias: true, alpha: false });
@@ -103,6 +118,7 @@ export class Viewport {
       }
     });
     this.current = null;
+    this.parts.clear();
   }
 
   /** Parses GLB bytes and swaps them in as the only visible model. */
@@ -116,7 +132,11 @@ export class Viewport {
       if (!(o instanceof Mesh)) return;
       const geo = o.geometry;
       triangles += (geo.index ? geo.index.count : geo.attributes.position.count) / 3;
-      const mat = o.material as MeshStandardMaterial;
+      // An assembled scene carries no glTF materials, so GLTFLoader hands every
+      // part the same cached default. Clone before touching it or tinting one
+      // part tints all of them.
+      const mat = (o.material as MeshStandardMaterial).clone();
+      o.material = mat;
       // Generated shells are frequently open; single-sided rendering reads as
       // missing geometry rather than as a hole.
       mat.side = DoubleSide;
@@ -128,6 +148,22 @@ export class Viewport {
       mat.envMapIntensity = 0.9;
     });
 
+    // assemble.py writes one named top-level node per part; that node name is
+    // the handle the rest of the pipeline (and Roblox) uses for the part.
+    const parts: PartInfo[] = [];
+    for (const child of root.children) {
+      if (!child.name) continue;
+      let tris = 0;
+      child.traverse((o) => {
+        if (!(o instanceof Mesh)) return;
+        const geo = o.geometry;
+        tris += (geo.index ? geo.index.count : geo.attributes.position.count) / 3;
+      });
+      if (!tris) continue;
+      this.parts.set(child.name, child);
+      parts.push({ name: child.name, triangles: Math.round(tris) });
+    }
+
     const box = new Box3().setFromObject(root);
     const size = box.getSize(new Vector3());
     const center = box.getCenter(new Vector3());
@@ -137,17 +173,38 @@ export class Viewport {
 
     this.scene.add(root);
     this.current = root;
-    this.frame(box);
+    // `box` predates the recentring above, so the post-offset target is derived
+    // rather than read back off it.
+    this.frame(box, new Vector3(0, size.y / 2, 0));
 
-    return { triangles: Math.round(triangles), size: [size.x, size.y, size.z] };
+    return { triangles: Math.round(triangles), size: [size.x, size.y, size.z], parts };
   }
 
-  private frame(box: Box3) {
+  /** Hides every other part and reframes on this one; `null` restores all. */
+  isolate(name: string | null) {
+    if (name !== null && !this.parts.has(name)) return;
+    for (const [key, node] of this.parts) node.visible = name === null || key === name;
+    if (!this.current) return;
+    const node = name === null ? this.current : this.parts.get(name)!;
+    const box = new Box3().setFromObject(node);
+    this.frame(box, box.getCenter(new Vector3()));
+  }
+
+  /** Lifts one part without hiding the rest, for hover feedback off the list. */
+  highlight(name: string | null) {
+    for (const [key, node] of this.parts) {
+      const on = key === name;
+      node.traverse((o) => {
+        if (!(o instanceof Mesh)) return;
+        const mat = o.material as MeshStandardMaterial;
+        mat.emissive.setScalar(on ? HIGHLIGHT_LIFT : 0);
+      });
+    }
+  }
+
+  private frame(box: Box3, target: Vector3) {
     const sphere = box.getBoundingSphere(new Sphere());
     const radius = Math.max(sphere.radius, 0.001);
-    const height = box.max.y - box.min.y;
-
-    const target = new Vector3(0, height / 2, 0);
     const distance = (radius / Math.sin((this.camera.fov * Math.PI) / 360)) * 1.35;
     const dir = new Vector3(0.9, 0.55, 1).normalize();
     this.camera.position.copy(dir.multiplyScalar(distance).add(target));
