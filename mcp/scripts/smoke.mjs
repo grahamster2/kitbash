@@ -2,15 +2,16 @@
  * End-to-end smoke test: drives the MCP server over stdio exactly as a coding
  * agent would, and generates a real mesh on the GPU.
  *
- *   KITBASH_SERVER_URL=http://<gpu-host>:8188 node scripts/smoke.mjs <image>
+ *   KITBASH_SERVER_URL=http://<gpu-host>:8188 node scripts/smoke.mjs <image> [target_faces]
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { statSync } from "node:fs";
 
 const image = process.argv[2];
+const targetFaces = process.argv[3] ? Number(process.argv[3]) : undefined;
 if (!image) {
-  console.error("usage: node scripts/smoke.mjs <reference-image>");
+  console.error("usage: node scripts/smoke.mjs <reference-image> [target_faces]");
   process.exit(2);
 }
 
@@ -41,6 +42,7 @@ const gen = await client.callTool(
       output_path: out,
       part_name: "smoke",
       seed: 7,
+      target_faces: targetFaces,
       timeout_seconds: 420,
     },
     // Asking for progress is what keeps the request alive past 60s.

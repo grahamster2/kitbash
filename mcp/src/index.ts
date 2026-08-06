@@ -96,10 +96,13 @@ server.registerTool(
         .optional()
         .describe(
           "Decimate the mesh to roughly this many faces before saving. Raw " +
-            "output is 300k+ faces, which no game engine will accept — set " +
-            "this for anything headed into Roblox or Unity. 5000-20000 is a " +
-            "sensible range for a single prop. The dense original is kept " +
-            "server-side either way.",
+            "output is ~350k faces, which no game engine will accept, so set " +
+            "this for anything headed into Roblox or Unity.\n" +
+            "20000 is the recommended default: 18x smaller with no visible " +
+            "loss. Drop to 8000 for props with no fine surface detail. Stay " +
+            "at 40000+ only when the part carries engraved or embossed detail " +
+            "that must read up close, which is the first thing decimation " +
+            "destroys. The dense original is kept server-side either way.",
         ),
       octree_resolution: z
         .number()
