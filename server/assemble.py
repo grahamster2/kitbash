@@ -15,6 +15,8 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
+import materials
+
 log = logging.getLogger("kitbash.assemble")
 
 
@@ -50,11 +52,13 @@ def describe(mesh_path: Path) -> dict:
     }
 
 
-def assemble(parts: list[dict], out_path: Path) -> dict:
+def assemble(parts: list[dict], out_path: Path, apply_materials: bool = True) -> dict:
     """Build one glTF from many part meshes.
 
-    Each part: {name, mesh_path, position?, rotation?, scale?}. Names become
-    glTF node names, which is what makes the parts addressable downstream.
+    Each part: {name, mesh_path, position?, rotation?, scale?, material?}. Names
+    become glTF node names, which is what makes the parts addressable
+    downstream — and, when apply_materials is on, what picks each part's
+    material. See materials.py for why that is worth doing.
     """
     if not parts:
         raise ValueError("no parts to assemble")
@@ -79,12 +83,17 @@ def assemble(parts: list[dict], out_path: Path) -> dict:
             n += 1
         used_names.add(name)
 
+        material = None
+        if apply_materials:
+            material = materials.apply_to_mesh(mesh, name, part.get("material"))
+
         T = _transform(part.get("position"), part.get("rotation"), part.get("scale"))
         scene.add_geometry(mesh, node_name=name, geom_name=name, transform=T)
 
         placed.append({
             "name": name,
             "faces": int(len(mesh.faces)),
+            "material": material,
             "source": str(mesh_path),
         })
 

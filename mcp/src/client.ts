@@ -120,6 +120,7 @@ export interface PartPlacement {
   position?: number[];
   rotation?: number[];
   scale?: number | number[];
+  material?: string;
   use_raw?: boolean;
 }
 
@@ -128,7 +129,7 @@ export interface AssembledScene {
   scene_path: string;
   part_count: number;
   total_faces: number;
-  parts: { name: string; faces: number; source: string }[];
+  parts: { name: string; faces: number; material: string | null; source: string }[];
   bounds_min: number[];
   bounds_max: number[];
   size: number[];
@@ -138,6 +139,7 @@ export interface AssembledScene {
 export function assembleScene(body: {
   parts: PartPlacement[];
   scene_name?: string;
+  apply_materials?: boolean;
 }): Promise<AssembledScene> {
   return request<AssembledScene>("/assemble", {
     method: "POST",

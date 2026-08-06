@@ -311,6 +311,14 @@ server.registerTool(
               .optional()
               .describe("XYZ euler degrees"),
             scale: z.union([z.number(), z.array(z.number()).length(3)]).optional(),
+            material: z
+              .string()
+              .optional()
+              .describe(
+                "Override the material inferred from the part name. One of: " +
+                  "metal, dark_metal, glass, rubber, wood, stone, fabric, " +
+                  "leather, paint, plastic, gold, emissive.",
+              ),
             use_raw: z
               .boolean()
               .optional()
@@ -323,11 +331,20 @@ server.registerTool(
         .min(1),
       output_path: z.string().describe("Where to write the assembled .glb"),
       scene_name: z.string().optional(),
+      apply_materials: z
+        .boolean()
+        .optional()
+        .describe(
+          "Assign each part a PBR material inferred from its name — 'canopy' " +
+            "becomes glass, 'wheel' rubber, 'engine' metal. On by default, " +
+            "because generations are otherwise uniform grey. Name parts for " +
+            "what they are and this comes out looking deliberate.",
+        ),
     },
   },
-  async ({ parts, output_path, scene_name }) => {
+  async ({ parts, output_path, scene_name, apply_materials }) => {
     try {
-      const scene = await api.assembleScene({ parts, scene_name });
+      const scene = await api.assembleScene({ parts, scene_name, apply_materials });
       const glb = await api.downloadScene(scene.scene_id);
       const out = resolve(output_path);
       await mkdir(dirname(out), { recursive: true });
@@ -337,7 +354,11 @@ server.registerTool(
         output_path: out,
         part_count: scene.part_count,
         total_faces: scene.total_faces,
-        parts: scene.parts.map((p) => ({ name: p.name, faces: p.faces })),
+        parts: scene.parts.map((p) => ({
+          name: p.name,
+          faces: p.faces,
+          material: p.material,
+        })),
         size: scene.size,
         bytes: glb.byteLength,
       });

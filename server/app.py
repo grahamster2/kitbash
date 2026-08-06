@@ -20,6 +20,7 @@ import assemble as assembly
 import config
 import export
 import jobs
+import materials
 import pipeline
 
 logging.basicConfig(
@@ -118,6 +119,13 @@ class PartPlacement(BaseModel):
     position: list[float] | None = Field(None, description="[x, y, z]")
     rotation: list[float] | None = Field(None, description="[rx, ry, rz] in degrees")
     scale: float | list[float] | None = None
+    material: str | None = Field(
+        None,
+        description=(
+            "Override the material guessed from the part name. "
+            f"One of {materials.families()}."
+        ),
+    )
     # Assemble from the dense original instead of the decimated export. Useful
     # when one part needs detail the rest of the scene does not.
     use_raw: bool = False
@@ -126,6 +134,13 @@ class PartPlacement(BaseModel):
 class AssembleRequest(BaseModel):
     parts: list[PartPlacement]
     scene_name: str | None = None
+    apply_materials: bool = Field(
+        True,
+        description=(
+            "Assign a PBR material to each part from its name. On by default "
+            "because the alternative is uniform grey; see server/materials.py."
+        ),
+    )
 
 
 def _part_mesh_path(p: PartPlacement) -> Path:
@@ -160,6 +175,7 @@ def assemble_scene(req: AssembleRequest):
             "position": p.position,
             "rotation": p.rotation,
             "scale": p.scale,
+            "material": p.material,
         }
         for p in req.parts
     ]
@@ -167,10 +183,16 @@ def assemble_scene(req: AssembleRequest):
     scene_id = uuid.uuid4().hex[:12]
     out = config.OUT_DIR / "scenes" / scene_id / f"{req.scene_name or 'scene'}.glb"
     try:
-        result = assembly.assemble(resolved, out)
+        result = assembly.assemble(resolved, out, req.apply_materials)
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"scene_id": scene_id, **result}
+
+
+@api.get("/materials")
+def list_materials():
+    """The material families a part name can resolve to."""
+    return {"families": materials.families(), "default": materials.DEFAULT_MATERIAL}
 
 
 @api.get("/scenes/{scene_id}/mesh")

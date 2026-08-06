@@ -167,5 +167,58 @@ def test_assemble_records_the_source_mesh_of_each_part(make_mesh, tmp_path):
         [{"name": "hull", "mesh_path": str(path)}], tmp_path / "scene.glb"
     )
 
-    assert result["parts"][0] == {"name": "hull", "faces": 12, "source": str(path)}
+    assert result["parts"][0] == {
+        "name": "hull",
+        "faces": 12,
+        "material": "paint",
+        "source": str(path),
+    }
     assert result["scene_path"] == str(tmp_path / "scene.glb")
+
+
+def test_assemble_picks_a_material_from_each_part_name(make_mesh, tmp_path):
+    path = make_mesh(trimesh.creation.box())
+
+    result = assemble.assemble(
+        [
+            {"name": "canopy", "mesh_path": str(path)},
+            {"name": "front_wheel", "mesh_path": str(path)},
+            {"name": "engine", "mesh_path": str(path)},
+        ],
+        tmp_path / "scene.glb",
+    )
+
+    assert [p["material"] for p in result["parts"]] == ["glass", "rubber", "metal"]
+
+
+def test_assemble_honours_an_explicit_material_over_the_name(make_mesh, tmp_path):
+    path = make_mesh(trimesh.creation.box())
+
+    result = assemble.assemble(
+        [{"name": "canopy", "mesh_path": str(path), "material": "gold"}],
+        tmp_path / "scene.glb",
+    )
+
+    assert result["parts"][0]["material"] == "gold"
+
+
+def test_assemble_can_skip_materials(make_mesh, tmp_path):
+    path = make_mesh(trimesh.creation.box())
+
+    result = assemble.assemble(
+        [{"name": "canopy", "mesh_path": str(path)}],
+        tmp_path / "scene.glb",
+        apply_materials=False,
+    )
+
+    assert result["parts"][0]["material"] is None
+
+
+def test_assemble_rejects_an_unknown_material(make_mesh, tmp_path):
+    path = make_mesh(trimesh.creation.box())
+
+    with pytest.raises(ValueError, match="unknown material"):
+        assemble.assemble(
+            [{"name": "hull", "mesh_path": str(path), "material": "unobtainium"}],
+            tmp_path / "scene.glb",
+        )
