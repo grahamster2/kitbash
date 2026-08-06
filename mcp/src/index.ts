@@ -253,6 +253,88 @@ server.registerTool(
 );
 
 server.registerTool(
+  "describe_part",
+  {
+    title: "Measure a generated part",
+    description:
+      "Bounding box, size and center of a finished part, in the mesh's own " +
+      "units. Call this before assemble_parts so placement is computed from " +
+      "real dimensions rather than guessed.",
+    inputSchema: { job_id: z.string() },
+  },
+  async ({ job_id }) => {
+    try {
+      return json(await api.describePart(job_id));
+    } catch (err) {
+      return failure(err instanceof Error ? err.message : String(err));
+    }
+  },
+);
+
+server.registerTool(
+  "assemble_parts",
+  {
+    title: "Assemble parts into one scene",
+    description:
+      "Composes separately-generated parts into a single .glb with one named " +
+      "node per part.\n\n" +
+      "This is the point of generating parts separately. A single generation " +
+      "produces one welded blob you cannot edit; an assembled scene keeps " +
+      "every part addressable, so a part can be regenerated on its own later " +
+      "without rerolling the whole object.\n\n" +
+      "Positions are in the parts' own units — call describe_part first to " +
+      "get real dimensions. Rotations are XYZ euler degrees, applied after " +
+      "scale and before translation.",
+    inputSchema: {
+      parts: z
+        .array(
+          z.object({
+            job_id: z.string().describe("A completed generate_part job"),
+            name: z.string().describe("Node name, e.g. 'fuselage'"),
+            position: z.array(z.number()).length(3).optional(),
+            rotation: z
+              .array(z.number())
+              .length(3)
+              .optional()
+              .describe("XYZ euler degrees"),
+            scale: z.union([z.number(), z.array(z.number()).length(3)]).optional(),
+            use_raw: z
+              .boolean()
+              .optional()
+              .describe(
+                "Use the dense pre-decimation mesh for this part, when one " +
+                  "part needs detail the rest of the scene does not.",
+              ),
+          }),
+        )
+        .min(1),
+      output_path: z.string().describe("Where to write the assembled .glb"),
+      scene_name: z.string().optional(),
+    },
+  },
+  async ({ parts, output_path, scene_name }) => {
+    try {
+      const scene = await api.assembleScene({ parts, scene_name });
+      const glb = await api.downloadScene(scene.scene_id);
+      const out = resolve(output_path);
+      await mkdir(dirname(out), { recursive: true });
+      await writeFile(out, glb);
+      return json({
+        scene_id: scene.scene_id,
+        output_path: out,
+        part_count: scene.part_count,
+        total_faces: scene.total_faces,
+        parts: scene.parts.map((p) => ({ name: p.name, faces: p.faces })),
+        size: scene.size,
+        bytes: glb.byteLength,
+      });
+    } catch (err) {
+      return failure(err instanceof Error ? err.message : String(err));
+    }
+  },
+);
+
+server.registerTool(
   "list_generation_jobs",
   {
     title: "List recent generation jobs",

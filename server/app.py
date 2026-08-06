@@ -8,11 +8,14 @@ Run:  python -m uvicorn app:api --host 0.0.0.0 --port 8188
 """
 import logging
 import time
+import uuid
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+import assemble as assembly
 import config
 import jobs
 import pipeline
@@ -103,6 +106,89 @@ def get_mesh(job_id: str):
         media_type="model/gltf-binary",
         filename=f"{job_id}.glb",
     )
+
+
+class PartPlacement(BaseModel):
+    job_id: str = Field(..., description="A completed image_to_3d job")
+    name: str = Field(..., description="glTF node name for this part")
+    position: list[float] | None = Field(None, description="[x, y, z]")
+    rotation: list[float] | None = Field(None, description="[rx, ry, rz] in degrees")
+    scale: float | list[float] | None = None
+    # Assemble from the dense original instead of the decimated export. Useful
+    # when one part needs detail the rest of the scene does not.
+    use_raw: bool = False
+
+
+class AssembleRequest(BaseModel):
+    parts: list[PartPlacement]
+    scene_name: str | None = None
+
+
+def _part_mesh_path(p: PartPlacement) -> Path:
+    job = jobs.get(p.job_id)
+    if job is None:
+        raise HTTPException(404, f"no such job: {p.job_id}")
+    if job["status"] != jobs.DONE:
+        raise HTTPException(409, f"job {p.job_id} is {job['status']}, not done")
+    mesh_path = Path(job["result"]["mesh_path"])
+    if p.use_raw:
+        raw = mesh_path.parent / "mesh_raw.glb"
+        if not raw.exists():
+            raise HTTPException(
+                404,
+                f"job {p.job_id} has no mesh_raw.glb — it was not decimated, "
+                f"so mesh.glb is already the dense original",
+            )
+        return raw
+    return mesh_path
+
+
+@api.post("/assemble")
+def assemble_scene(req: AssembleRequest):
+    """Compose finished parts into a single glTF with one node per part."""
+    if not req.parts:
+        raise HTTPException(400, "no parts given")
+
+    resolved = [
+        {
+            "name": p.name,
+            "mesh_path": str(_part_mesh_path(p)),
+            "position": p.position,
+            "rotation": p.rotation,
+            "scale": p.scale,
+        }
+        for p in req.parts
+    ]
+
+    scene_id = uuid.uuid4().hex[:12]
+    out = config.OUT_DIR / "scenes" / scene_id / f"{req.scene_name or 'scene'}.glb"
+    try:
+        result = assembly.assemble(resolved, out)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"scene_id": scene_id, **result}
+
+
+@api.get("/scenes/{scene_id}/mesh")
+def get_scene(scene_id: str):
+    scene_dir = config.OUT_DIR / "scenes" / scene_id
+    matches = sorted(scene_dir.glob("*.glb")) if scene_dir.exists() else []
+    if not matches:
+        raise HTTPException(404, f"no such scene: {scene_id}")
+    return FileResponse(
+        matches[0], media_type="model/gltf-binary", filename=matches[0].name
+    )
+
+
+@api.get("/jobs/{job_id}/describe")
+def describe_part(job_id: str):
+    """Bounds and size of a finished part, so a caller can place it."""
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, f"no such job: {job_id}")
+    if job["status"] != jobs.DONE:
+        raise HTTPException(409, f"job is {job['status']}, not done")
+    return assembly.describe(Path(job["result"]["mesh_path"]))
 
 
 @api.post("/admin/unload")

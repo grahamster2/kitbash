@@ -114,6 +114,58 @@ export function listJobs(limit = 20): Promise<{ jobs: Job[] }> {
   return request<{ jobs: Job[] }>(`/jobs?limit=${limit}`, undefined, 10_000);
 }
 
+export interface PartPlacement {
+  job_id: string;
+  name: string;
+  position?: number[];
+  rotation?: number[];
+  scale?: number | number[];
+  use_raw?: boolean;
+}
+
+export interface AssembledScene {
+  scene_id: string;
+  scene_path: string;
+  part_count: number;
+  total_faces: number;
+  parts: { name: string; faces: number; source: string }[];
+  bounds_min: number[];
+  bounds_max: number[];
+  size: number[];
+  file_bytes: number;
+}
+
+export function assembleScene(body: {
+  parts: PartPlacement[];
+  scene_name?: string;
+}): Promise<AssembledScene> {
+  return request<AssembledScene>("/assemble", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function describePart(id: string): Promise<{
+  faces: number;
+  bounds_min: number[];
+  bounds_max: number[];
+  size: number[];
+  center: number[];
+}> {
+  return request(`/jobs/${id}/describe`, undefined, 15_000);
+}
+
+export async function downloadScene(sceneId: string): Promise<Uint8Array> {
+  const res = await fetch(`${SERVER_URL}/scenes/${sceneId}/mesh`);
+  if (!res.ok) {
+    throw new KitbashError(
+      `download of scene ${sceneId} failed: ${res.status} ${res.statusText}`,
+    );
+  }
+  return new Uint8Array(await res.arrayBuffer());
+}
+
 /** Downloads the finished mesh. Returns raw GLB bytes. */
 export async function downloadMesh(id: string): Promise<Uint8Array> {
   const res = await fetch(`${SERVER_URL}/jobs/${id}/mesh`);
