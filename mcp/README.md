@@ -30,9 +30,15 @@ the GPU box when it is not.
 | --- | --- |
 | `check_gpu_server` | Reachability, free VRAM, queue depth |
 | `generate_part` | Reference image → `.glb` on disk |
+| `describe_part` | Bounds, size and center of a finished part |
+| `assemble_parts` | Compose parts into one scene, one named node each |
 | `get_generation_job` | Status of a running job |
 | `save_mesh` | Download a job that finished after a timeout |
 | `list_generation_jobs` | Recent jobs |
+
+The intended loop is `generate_part` per part → `describe_part` to get real
+dimensions → `assemble_parts` to place them. See
+[docs/MULTI-PART.md](../docs/MULTI-PART.md).
 
 ## Things worth knowing
 
@@ -51,10 +57,19 @@ pipeline; see `docs/SETUP-GPU.md`.
 **Meshes come out dense** — 300k+ faces, far too heavy for a game engine.
 Decimation before import is not optional.
 
-## Smoke test
+**Placement is glTF convention: +Y is up.** Blender and Roblox are Z-up and
+convert on import, so a part at `y=2` here lands at `z=2` there.
 
-Runs a real generation against the configured server:
+## Smoke tests
+
+A real generation against the configured server, optionally decimated:
 
 ```bash
-KITBASH_SERVER_URL=http://<gpu-host>:8188 node scripts/smoke.mjs reference.png
+KITBASH_SERVER_URL=http://<gpu-host>:8188 node scripts/smoke.mjs reference.png 20000
+```
+
+Assembly on its own, reusing already-completed jobs so it runs in a second:
+
+```bash
+KITBASH_SERVER_URL=http://<gpu-host>:8188 node scripts/assemble-demo.mjs
 ```
