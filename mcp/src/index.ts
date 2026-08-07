@@ -36,6 +36,80 @@ function failure(message: string) {
   };
 }
 
+/**
+ * A tool result the model can actually look at.
+ *
+ * MCP image content is base64 in the result itself — no file path, no URL — so
+ * the picture arrives in the same turn as the tool call and the model sees it
+ * without a second round trip. This is the entire point of the preview tools:
+ * an agent that assembles a scene and never looks at it is the open loop every
+ * defect in docs/MULTI-PART.md came through.
+ */
+function image(png: Uint8Array, caption: string) {
+  return {
+    content: [
+      {
+        type: "image" as const,
+        data: Buffer.from(png).toString("base64"),
+        mimeType: "image/png",
+      },
+      { type: "text" as const, text: caption },
+    ],
+  };
+}
+
+const PREVIEW_VIEWS = [
+  "side",
+  "front",
+  "top",
+  "three_qtr",
+  "rear_qtr",
+  "low",
+] as const;
+
+const previewInputs = {
+  views: z
+    .array(z.enum(PREVIEW_VIEWS))
+    .optional()
+    .describe(
+      "Which angles to put on the sheet, in order. Defaults to all six. " +
+        "Keep at least one elevation and the top view: a wing detached along " +
+        "X is invisible from the side and a fin floating in Y is invisible " +
+        "from the top.",
+    ),
+  size: z
+    .number()
+    .int()
+    .optional()
+    .describe("Sheet width in pixels, 256-2400. Default 1200."),
+  columns: z.number().int().optional().describe("Tiles per row. Default 3."),
+  highlight: z
+    .string()
+    .optional()
+    .describe(
+      "Paint one named part magenta, leaving every other part exactly as it " +
+        "renders without this. Use it when the sheet shows something wrong " +
+        "and you need to know which part it is.",
+    ),
+  isolate: z
+    .boolean()
+    .optional()
+    .describe(
+      "With highlight, hide every other part. The camera does not move, so " +
+        "the isolated part sits at the same pixel it occupied in the full " +
+        "render — flip between the two to see where it actually is.",
+    ),
+};
+
+/** What to tell the model to do with the picture it was just handed. */
+const LOOK_AT_IT =
+  "Look at the image before you say the build worked. Check, in this order: " +
+  "(1) does every part touch the ground or the part it is meant to join, or " +
+  "is something hovering — a shadow sitting away from the part that casts it " +
+  "means it is floating; (2) are left/right pairs symmetric; (3) does " +
+  "anything overshoot or intersect. If something is wrong, fix the placement " +
+  "and render again.";
+
 server.registerTool(
   "check_gpu_server",
   {
@@ -385,7 +459,10 @@ server.registerTool(
       "Coordinates are glTF convention: +Y is UP, +X right, +Z toward the " +
       "viewer. Stack parts along Y. Roblox is Y-up too, so placement carries " +
       "over unchanged. Blender is Z-up and converts on import, mapping " +
-      "(x, y, z) to (x, -z, y) — expected, not a bug.",
+      "(x, y, z) to (x, -z, y) — expected, not a bug.\n\n" +
+      "Call preview_scene on the result before reporting success. The part " +
+      "list this returns describes a debris field exactly as convincingly as " +
+      "it describes an aeroplane.",
     inputSchema: {
       parts: z
         .array(
@@ -458,7 +535,104 @@ server.registerTool(
         })),
         size: scene.size,
         bytes: glb.byteLength,
+        next: `Call preview_scene with scene_id ${scene.scene_id} and look at ` +
+          `the image before reporting this as finished.`,
       });
+    } catch (err) {
+      return failure(err instanceof Error ? err.message : String(err));
+    }
+  },
+);
+
+server.registerTool(
+  "preview_scene",
+  {
+    title: "Look at an assembled scene",
+    description:
+      "Renders an assembled scene to a shaded contact sheet — side, front, " +
+      "top and three-quarter views on one image — and returns it as an image " +
+      "you can look at.\n\n" +
+      "CALL THIS AFTER EVERY assemble_parts, BEFORE reporting success. You " +
+      "authored the placement; the server resolved it to coordinates; this is " +
+      "the only way to find out whether the result is the object you meant. " +
+      "The part list assemble_parts returns will look perfectly reasonable " +
+      "for a scene that is a debris field.\n\n" +
+      "The model sits on a ground plane and casts a shadow, because a part " +
+      "floating in empty space looks fine and a part floating above a floor " +
+      "does not. All views share one fixed camera, so a part that drifted out " +
+      "of place cannot hide behind a re-framed shot.\n\n" +
+      "Costs about a second and no VRAM — it is pure CPU, so it works while " +
+      "the GPU is busy generating. Cheap enough to call in a fix-and-recheck " +
+      "loop, which is how it is meant to be used.\n\n" +
+      "Also returns each part's gap above the floor in the scene's own units, " +
+      "so 'it looks like it is floating' can be checked against a number.",
+    inputSchema: { scene_id: z.string().describe("From assemble_parts"), ...previewInputs },
+  },
+  async ({ scene_id, views, size, columns, highlight, isolate }) => {
+    try {
+      const png = await api.previewScene(scene_id, {
+        views: views ? [...views] : undefined,
+        size,
+        columns,
+        highlight,
+        isolate,
+      });
+      const ground = await api.sceneGround(scene_id).catch(() => null);
+      const floating = ground
+        ? ground.parts.filter((p) => p.gap_fraction > 0.01)
+        : [];
+      const caption = [
+        `scene ${scene_id}, ${ground?.parts.length ?? "?"} parts, ` +
+          `floor y=${ground?.floor_y ?? "?"}`,
+        floating.length
+          ? `Clear of the floor (gap, and as a fraction of the scene's size): ` +
+            floating
+              .map((p) => `${p.name} ${p.gap} (${(p.gap_fraction * 100).toFixed(1)}%)`)
+              .join(", ") +
+            `. A gap is only a defect if the part is not held up by another ` +
+            `part — a wing on a fuselage should clear the floor; a wheel ` +
+            `should not.`
+          : "Every part reaches the floor.",
+        LOOK_AT_IT,
+      ].join("\n\n");
+      return image(png, caption);
+    } catch (err) {
+      return failure(err instanceof Error ? err.message : String(err));
+    }
+  },
+);
+
+server.registerTool(
+  "preview_part",
+  {
+    title: "Look at a single generated part",
+    description:
+      "Renders one finished part — from generate_part, a scripted primitive, " +
+      "or any completed job — to a shaded contact sheet and returns it as an " +
+      "image you can look at.\n\n" +
+      "Worth calling before assembling: generation returns whatever the model " +
+      "made of the prompt, and 'a hollow elongated shell' comes back as a " +
+      "whole aeroplane often enough that it is worth thirty seconds to check. " +
+      "The part is drawn on a ground plane at its own scale, so its " +
+      "proportions read directly.\n\n" +
+      "Pure CPU, about a second, no VRAM.",
+    inputSchema: { job_id: z.string().describe("A completed job"), ...previewInputs },
+  },
+  async ({ job_id, views, size, columns, highlight, isolate }) => {
+    try {
+      const png = await api.previewJob(job_id, {
+        views: views ? [...views] : undefined,
+        size,
+        columns,
+        highlight,
+        isolate,
+      });
+      return image(
+        png,
+        `job ${job_id}. Check the shape is the part you asked for and not the ` +
+          `whole object, that it is the right way up, and that it is one solid ` +
+          `piece rather than fragments.`,
+      );
     } catch (err) {
       return failure(err instanceof Error ? err.message : String(err));
     }

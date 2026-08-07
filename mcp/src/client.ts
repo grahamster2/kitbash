@@ -236,6 +236,78 @@ export async function downloadScene(sceneId: string): Promise<Uint8Array> {
   return new Uint8Array(await res.arrayBuffer());
 }
 
+export interface PreviewOptions {
+  views?: string[];
+  size?: number;
+  columns?: number;
+  highlight?: string;
+  isolate?: boolean;
+}
+
+function previewQuery(opts: PreviewOptions): string {
+  const q = new URLSearchParams();
+  if (opts.views?.length) q.set("views", opts.views.join(","));
+  if (opts.size) q.set("size", String(opts.size));
+  if (opts.columns) q.set("columns", String(opts.columns));
+  if (opts.highlight) q.set("highlight", opts.highlight);
+  if (opts.isolate) q.set("isolate", "true");
+  const s = q.toString();
+  return s ? `?${s}` : "";
+}
+
+/**
+ * Renders a scene or a part to a PNG contact sheet. Returns raw PNG bytes.
+ *
+ * Not `request()`: that one parses JSON, and this is the one endpoint whose
+ * whole value is that it comes back as an image.
+ */
+async function fetchPng(path: string): Promise<Uint8Array> {
+  let res: Response;
+  try {
+    res = await fetch(`${SERVER_URL}${path}`, {
+      signal: AbortSignal.timeout(120_000),
+    });
+  } catch (err) {
+    throw new KitbashError(
+      `Could not reach the Kitbash GPU server at ${SERVER_URL} ` +
+        `(${err instanceof Error ? err.message : String(err)}).`,
+    );
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new KitbashError(
+      `GET ${path} -> ${res.status} ${res.statusText}${
+        body ? `: ${body.slice(0, 400)}` : ""
+      }`,
+    );
+  }
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+export function previewScene(
+  sceneId: string,
+  opts: PreviewOptions = {},
+): Promise<Uint8Array> {
+  return fetchPng(`/scenes/${sceneId}/preview${previewQuery(opts)}`);
+}
+
+export function previewJob(
+  jobId: string,
+  opts: PreviewOptions = {},
+): Promise<Uint8Array> {
+  return fetchPng(`/jobs/${jobId}/preview${previewQuery(opts)}`);
+}
+
+export interface GroundReport {
+  scene_id: string;
+  floor_y: number;
+  parts: { name: string; gap: number; gap_fraction: number; faces: number }[];
+}
+
+export function sceneGround(sceneId: string): Promise<GroundReport> {
+  return request<GroundReport>(`/scenes/${sceneId}/ground`, undefined, 60_000);
+}
+
 /** Downloads the finished mesh. Returns raw GLB bytes. */
 export async function downloadMesh(id: string): Promise<Uint8Array> {
   const res = await fetch(`${SERVER_URL}/jobs/${id}/mesh`);

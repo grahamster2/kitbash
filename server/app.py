@@ -12,8 +12,8 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 import assemble as assembly
@@ -26,6 +26,7 @@ import jobs
 import materials
 import orient as orienting
 import pipeline
+import preview as previewing
 import primitives
 import trellis
 
@@ -226,6 +227,140 @@ def get_mesh(job_id: str):
         media_type="model/gltf-binary",
         filename=f"{job_id}.glb",
     )
+
+
+# --------------------------------------------------------------------------
+# preview
+# --------------------------------------------------------------------------
+# The one thing an agent assembling a scene over MCP could not previously do is
+# look at it. See server/preview.py and docs/PREVIEW.md.
+_PREVIEW_VIEWS = Query(
+    None,
+    description=(
+        "Comma-separated view names, in sheet order. "
+        f"Any of {sorted(previewing.VIEWS)}; "
+        f"default {','.join(previewing.DEFAULT_VIEWS)}."
+    ),
+)
+_PREVIEW_SIZE = Query(1200, ge=256, le=2400, description="Sheet width in pixels.")
+_PREVIEW_COLUMNS = Query(3, ge=1, le=6, description="Tiles per row.")
+_PREVIEW_HIGHLIGHT = Query(
+    None, description="Paint this named part magenta; everything else is unchanged."
+)
+_PREVIEW_ISOLATE = Query(
+    False,
+    description=(
+        "With `highlight`, hide every other part. Framing does not change, so "
+        "the isolated part stays at the pixel it occupied in the full render."
+    ),
+)
+
+
+def _render_preview(source: Path, views, size, columns, highlight, isolate) -> Response:
+    """Shared body of both preview endpoints.
+
+    Rendering is CPU-only and takes about a second, so it runs inline rather
+    than through the job queue — the queue exists to serialise the GPU, which
+    this never touches, and a preview an agent has to poll for is a preview it
+    will stop calling.
+    """
+    names = [v.strip() for v in views.split(",") if v.strip()] if views else None
+    try:
+        png = previewing.preview_png(
+            source,
+            views=names or previewing.DEFAULT_VIEWS,
+            size=size,
+            columns=columns,
+            highlight=highlight,
+            isolate=isolate,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    # Not cacheable: the same scene id is re-rendered after a part is fixed.
+    return Response(content=png, media_type="image/png",
+                    headers={"Cache-Control": "no-store"})
+
+
+@api.get("/preview/views", responses={200: {"description": "Available view names"}})
+def list_preview_views():
+    """The named camera angles a preview can be composed from."""
+    return {
+        "views": {
+            name: {"yaw_deg": yaw, "pitch_deg": pitch, "roll_deg": roll}
+            for name, (yaw, pitch, roll) in previewing.VIEWS.items()
+        },
+        "default": list(previewing.DEFAULT_VIEWS),
+        "notes": (
+            "One camera distance is derived from the whole scene's bounds and "
+            "shared by every view, so tiles are directly comparable and a part "
+            "that floats cannot hide behind a re-framed camera."
+        ),
+    }
+
+
+@api.get("/jobs/{job_id}/preview", response_class=Response,
+         responses={200: {"content": {"image/png": {}}}})
+def preview_job(
+    job_id: str,
+    views: str | None = _PREVIEW_VIEWS,
+    size: int = _PREVIEW_SIZE,
+    columns: int = _PREVIEW_COLUMNS,
+    highlight: str | None = _PREVIEW_HIGHLIGHT,
+    isolate: bool = _PREVIEW_ISOLATE,
+):
+    """A shaded contact sheet of one finished part, on a ground plane."""
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, f"no such job: {job_id}")
+    if job["status"] != jobs.DONE:
+        raise HTTPException(409, f"job is {job['status']}, not done")
+    return _render_preview(
+        Path(job["result"]["mesh_path"]), views, size, columns, highlight, isolate
+    )
+
+
+@api.get("/scenes/{scene_id}/preview", response_class=Response,
+         responses={200: {"content": {"image/png": {}}}})
+def preview_scene(
+    scene_id: str,
+    views: str | None = _PREVIEW_VIEWS,
+    size: int = _PREVIEW_SIZE,
+    columns: int = _PREVIEW_COLUMNS,
+    highlight: str | None = _PREVIEW_HIGHLIGHT,
+    isolate: bool = _PREVIEW_ISOLATE,
+):
+    """A shaded contact sheet of an assembled scene, on a ground plane.
+
+    This is the check that closes the assembly loop: parts are placed from
+    measurements, and this is where a caller finds out whether the measurements
+    meant what it thought. Floating parts, parts that never joined and parts
+    that overshoot all show here and nowhere else in the API.
+    """
+    scene_dir = config.OUT_DIR / "scenes" / scene_id
+    matches = sorted(scene_dir.glob("*.glb")) if scene_dir.exists() else []
+    if not matches:
+        raise HTTPException(404, f"no such scene: {scene_id}")
+    return _render_preview(matches[0], views, size, columns, highlight, isolate)
+
+
+@api.get("/scenes/{scene_id}/ground")
+def scene_ground(scene_id: str):
+    """How far each part sits above the scene's floor, worst first.
+
+    The number beside the picture. A preview shows that the fin is floating; it
+    is this that says by how much, which is what a fix needs.
+    """
+    scene_dir = config.OUT_DIR / "scenes" / scene_id
+    matches = sorted(scene_dir.glob("*.glb")) if scene_dir.exists() else []
+    if not matches:
+        raise HTTPException(404, f"no such scene: {scene_id}")
+    parts = previewing.load_parts(matches[0])
+    framing = previewing.Framing.of(parts)
+    return {
+        "scene_id": scene_id,
+        "floor_y": round(framing.ground_y, 4),
+        "parts": previewing.ground_report(parts, framing),
+    }
 
 
 class PrimitiveRequest(BaseModel):
