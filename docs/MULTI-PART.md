@@ -42,6 +42,38 @@ Which buys three things:
   MeshParts in Roblox.
 - **Parts are reusable.** The same generated wheel goes on four vehicles.
 
+## The generator reconstructs bodies of revolution
+
+Worth knowing before you spend a GPU-hour re-prompting: for elongated smooth
+subjects, TRELLIS 2 at the 512 pipeline returns something **rotationally
+symmetric about its long axis**, whatever the reference showed.
+
+Measured on an aircraft fuselage. The reference clearly showed a raised cabin
+hump with a raked windscreen. The result is vertically symmetric at *every*
+station — the top of each section sits at exactly half its height, within 0.002
+over the whole length. The hump did not come back flattened or noisy. It came
+back as a **bulge that goes all the way round**, because an asymmetric top
+feature is not something the reconstruction represents at that resolution.
+
+The prompt was not the problem: it named no aircraft, stated the viewpoint, and
+specified slenderness numerically. It produced exactly the reference asked for,
+and the mesh still came back a solid of revolution.
+
+So the rule is:
+
+> **An asymmetric surface feature has to be a separate part, not a better
+> prompt.** A cabin hump, a spoiler, a turret, a chimney — place it on the body,
+> do not ask the body to grow it.
+
+Which is the same conclusion as everything else on this page, reached from a
+different direction. It also means a re-prompt is worth **at most one attempt**
+for this class of defect, and the attempt should be judged on whether the
+feature appeared at all rather than on whether the mesh looks nicer.
+
+Related: fineness ratio is not worth a re-prompt either. A too-fat body is
+corrected for free with a per-axis `scale`, which costs no GPU and keeps the
+body shape you already have.
+
 ## Cropping one reference per part does not work
 
 The obvious way to get per-part references is to crop them out of a single
