@@ -20,6 +20,7 @@ import assemble as assembly
 import config
 import decompose
 import export
+import hollow as hollowing
 import imagegen
 import jobs
 import materials
@@ -633,6 +634,84 @@ def run_decomposition(plan: dict):
 def decomposition_examples():
     """Worked plans. This is how a coding agent learns the format."""
     return {"examples": decompose.EXAMPLES}
+
+
+class HollowRequest(BaseModel):
+    job_id: str = Field(..., description="A completed job to hollow out")
+    wall_thickness: float = Field(0.04, description="In the mesh's own units")
+    resolution: int = Field(
+        64,
+        description=(
+            "Voxels along the longest axis. Counter-intuitively a CRACKED mesh "
+            "wants a COARSER grid: sealing a crack of width w needs a seal of "
+            "w/2 voxels, and the seal displaces the skin."
+        ),
+    )
+    openings: list[dict] | None = Field(
+        None, description="Apertures to cut, so the cavity can be reached"
+    )
+    max_faces: int = Field(20000, description="Roblox's per-mesh cap")
+
+
+@api.post("/hollow")
+def hollow_job(req: HollowRequest):
+    """Carve a cavity into a finished mesh, recorded as a new job."""
+    job = jobs.get(req.job_id)
+    if job is None:
+        raise HTTPException(404, f"no such job: {req.job_id}")
+    if job["status"] != jobs.DONE:
+        raise HTTPException(409, f"job is {job['status']}, not done")
+
+    job_id = uuid.uuid4().hex[:12]
+    out_dir = config.OUT_DIR / job_id
+    kwargs = {"wall_thickness": req.wall_thickness, "resolution": req.resolution,
+              "max_faces": req.max_faces}
+    if req.openings:
+        kwargs["openings"] = req.openings
+    try:
+        result = hollowing.hollow_file(
+            Path(job["result"]["mesh_path"]), out_dir / "mesh.glb", **kwargs
+        )
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    now = time.time()
+    record = {
+        "id": job_id, "type": "hollow", "status": jobs.DONE,
+        "created_at": now, "started_at": now, "finished_at": time.time(),
+        "params": {"source_job": req.job_id, **kwargs},
+        "result": result, "error": None,
+    }
+    _record(record)
+    return record
+
+
+@api.get("/hollow/primitives")
+def hollow_catalogue():
+    """Kinds that are hollow by construction — cheaper and cleaner than carving."""
+    return {"kinds": hollowing.catalogue()}
+
+
+@api.post("/hollow/primitives")
+def create_hollow_primitive(req: PrimitiveRequest):
+    job_id = uuid.uuid4().hex[:12]
+    try:
+        result = hollowing.store(
+            req.kind, req.params, config.OUT_DIR / job_id,
+            part_name=req.part_name, material=req.material, color=req.color,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    now = time.time()
+    job = {
+        "id": job_id, "type": "hollow_primitive", "status": jobs.DONE,
+        "created_at": now, "started_at": now, "finished_at": time.time(),
+        "params": {"kind": req.kind, "part_name": req.part_name or req.kind},
+        "result": result, "error": None,
+    }
+    _record(job)
+    return job
 
 
 @api.get("/materials")
