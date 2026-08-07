@@ -35,12 +35,33 @@ def test_every_kind_is_centred_on_the_origin(kind):
     assert mesh.bounding_box.centroid == pytest.approx([0, 0, 0], abs=1e-6)
 
 
+# Roblox allows 20 000 triangles per MeshPart. The kinds that carry real
+# surface relief — courses of masonry, roof tiles, rows of rivets — spend a
+# deliberate fraction of that; everything else stays where it always was. Both
+# numbers are the point rather than an accident, so both are asserted.
+RELIEF_KINDS = frozenset({
+    "wall_panel", "archway", "battlement", "roof", "chimney", "riveted_panel",
+})
+PLAIN_BUDGET = 2500
+RELIEF_BUDGET = 15000
+
+
 @pytest.mark.parametrize("kind", ALL_KINDS)
 def test_every_kind_is_far_under_the_engine_budget(kind):
     # An AI-generated equivalent lands at the 20,000-face decimation target.
     mesh = primitives.build(kind)
+    budget = RELIEF_BUDGET if kind in RELIEF_KINDS else PLAIN_BUDGET
 
-    assert 8 <= len(mesh.faces) <= 2500
+    assert 8 <= len(mesh.faces) <= budget
+
+
+@pytest.mark.parametrize("kind", ALL_KINDS)
+def test_no_kind_can_be_refused_by_its_own_default_parameters(kind):
+    """The defaults are the documented answer, so they must never be the thing
+    that trips `PRIMITIVE_MAX_FACES` and returns a 400."""
+    mesh = primitives.build(kind)
+
+    assert len(mesh.faces) < config.PRIMITIVE_MAX_FACES
 
 
 @pytest.mark.parametrize("kind", ALL_KINDS)

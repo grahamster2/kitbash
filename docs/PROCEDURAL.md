@@ -68,10 +68,32 @@ A multi-part build usually wants both. Script the cart's wheels, bed and
 staves; generate the horse. That is why the two paths share a job record rather
 than living in separate systems — see *Interchangeability* below.
 
-There is also a second, quieter argument. Roblox enforces **20 000 triangles per
-`MeshPart`**, so a generated part spends its entire budget and a scripted one
-spends 0.3–8 % of it. The whole catalogue at default parameters — all thirteen
-kinds — is **8 888 triangles**, less than half of what one generated crate costs.
+## The budget nobody was spending
+
+Roblox enforces **20 000 triangles per `MeshPart`**. A generated part spends its
+entire budget getting a silhouette right. The scripted catalogue used to spend
+**60 to 870** — between 0.3 % and 4 % — and the whole thirteen-kind library came
+to 8 888 triangles, less than half of what *one* generated crate costs.
+
+That was not thrift, it was a habit carried over from a constraint that does not
+apply here. A wall can carry five thousand triangles of real relief and still sit
+at a quarter of the cap. So the second half of this library is about spending it:
+
+![Before and after, and the new kinds](images/procedural-detail.png)
+
+| | before | after |
+| --- | --- | --- |
+| `wall_panel` | 720 triangles, a chamfered slab with a hole in it | **10 680** — twelve staggered courses of brick on both faces, cut around the aperture |
+| a door | a `plank`, 60 triangles | **1 704** as `panel_door` — stiles, rails, a bolection moulding swept round every panel |
+| whole catalogue | 8 888 across 13 kinds | **57 642 across 22 kinds** — still under three `MeshPart`s |
+
+The arithmetic that makes this safe is that the cap is **per mesh**, and a
+building is many meshes. The gatehouse below is 97 682 triangles across 22
+parts; the largest single part is 12 016, and Roblox is asked for 22 separate
+20 000-triangle budgets rather than one.
+
+Build times move with it — a brick wall is 38 ms of numpy rather than 3 ms —
+and 38 ms against 83 seconds of GPU is still a different category of operation.
 
 ## build123d vs. trimesh
 
@@ -131,6 +153,22 @@ of three ways:
   boolean, and a per-point flag keeps the modulation off the rings that should
   stay round.
 - `_prism(polygon, width, chamfer)` — a convex polygon extruded along X.
+- `_sweep(profile, path, closed, up)` — a closed 2D section taken along a 3D
+  polyline, mitring every corner. This is the one that produces most
+  architectural detail: a cornice, a skirting, a window casing, a handrail, an
+  archivolt, a plinth and a coping are the same mechanism at different sizes.
+  `_prism` is its two-station case and `_revolve` its circular one.
+- `_earclip(polygon)` — triangulates a *concave* polygon. `_prism` fans, which
+  is why it is convex-only; every moulding section worth having is concave (an
+  ogee is an S), so a sweep needs a real triangulator for its end caps. Ears are
+  only cut at strictly convex corners, so it never emits a degenerate triangle.
+
+The mitre is worth stating because it is the whole reason a casing is a sweep
+rather than four boxes. At a corner between two segments with in-plane normals
+`n0` and `n1`, the section's cross-axis is `(n0 + n1) / (1 + n0·n1)` — the
+vector whose projection on *both* normals is still 1. A frame swept round a
+3 × 2 path with a 0.2 projection comes out exactly 3.4 × 2.4, and the profile's
+outer edge arrives at the corner unbroken.
 
 The bevel itself is written once, in `_bevel`, and is not specific to a box:
 give it any convex solid whose every corner meets exactly three faces and it
@@ -148,35 +186,123 @@ the same kitbashing idea the rest of the project is built on.
 
 Every kind is asserted watertight, winding-consistent, free of degenerate
 triangles, and dimensioned to what was requested — see
-`server/tests/test_primitives.py`, and *Honest limits* for the one place a
-bevel is allowed to move a bounding box.
+`server/tests/test_primitives.py` and `server/tests/test_detail.py`, and
+*Honest limits* for the one place a bevel is allowed to move a bounding box.
+
+## The detail layer
+
+Four mechanisms, each of which applies to every kind rather than to one.
+
+**1. Composition helpers.** The showcase chest placed 39 lid planks by hand, one
+call each. `_line_points`, `_grid_points` and `_ring_points` produce a point
+set; `_array(part, points, jitter, seed)` copies a part onto it. Detail stops
+being expensive the moment it stops being typed out, and the seeded jitter is
+the cheapest available answer to "every crate looks like every other crate".
+
+**2. Detail decorators.** `_rivet(radius, proud, head)` builds a dome, pan or
+hex-bolt head with a skirt *below* the surface, so it interpenetrates the plate
+it is dropped on rather than resting a coincident face against it.
+`_studs_at(points, radius, proud, direction)` orients one and arrays it. The
+chest's brass studs, generalised: any face of anything can be greebled.
+
+**3. Profile sweeps.** `_moulding_profile(style, projection, height)` carries
+seven classical sections — `square`, `bevel`, `ovolo`, `cavetto`, `ogee`,
+`step`, `round` — as a table, because a cornice, an architrave, a skirting, a
+plinth, a coping and a handrail are the same curves at different sizes. `_sweep`
+takes one along any path.
+
+**4. Surface relief.** `_courses(...)` lays a rectangle out in staggered courses
+and returns block rectangles; `_face_relief(...)` turns those into chamfered
+boxes standing proud of a face. Two properties make it usable in a kit:
+
+- **The relief is recessed, not added.** The slab behind is thinned by the
+  relief and the blocks stand back out to the requested face, so a brick wall is
+  *exactly* as thick as a flat one and butts against it without a step.
+- **Apertures cut the courses.** A window is a keep-out rectangle that the
+  courses are subtracted against, so bricks stop at the reveal and partial
+  bricks are shortened. That is the difference between a wall with a hole in it
+  and a brick pattern painted over one.
+
+`surface` / `course` / `joint` / `relief` / `seed` are one shared vocabulary
+across `wall_panel`, `archway`, `battlement` and `chimney`, so four parts
+standing next to each other are the same masonry rather than four guesses at it.
 
 ## The catalogue
 
-Thirteen kinds. Every dimension is in **studs** (1 file unit = 1 stud, matching
-`/export`), and every part is centred on its bounding-box origin, matching
-generated parts so `/assemble`'s placement maths does not have to branch.
+Twenty-two kinds. Every dimension is in **studs** (1 file unit = 1 stud,
+matching `/export`), and every part is centred on its bounding-box origin,
+matching generated parts so `/assemble`'s placement maths does not have to
+branch.
 
 | kind | what it is | material | tris | glb | build |
 | --- | --- | --- | --- | --- | --- |
-| `crate` | recessed panels, corner posts, boards on every face; `planks` / `frame` / `plain` | wood | 1 380 | 25.7 KiB | 4.6 ms |
-| `barrel` | staved, bellied, with metal hoops | wood | 840 | 15.7 KiB | 2.9 ms |
-| `cylinder` | rod or pipe (`wall_thickness > 0`), chamfered rims | metal | 192 | 4.3 KiB | 1.5 ms |
-| `plank` | a dimensioned board | wood | 60 | 2.0 KiB | 0.9 ms |
-| `tapered_panel` | a trapezoidal one — wing, tailplane, fin, blade, body side | paint | 60 | 2.0 KiB | 0.9 ms |
-| `wall_panel` | wall section with an optional window or door, and trim | stone | 720 | 13.8 KiB | 2.7 ms |
-| `wheel` | chamfered tyre with hub and spokes, or a solid disc | rubber | 872 | 16.4 KiB | 2.8 ms |
-| `stairs` | `blocks` (masonry) or `open` (treads on two stringers) | stone | 360 | 7.4 KiB | 1.8 ms |
-| `ladder` | two rails and N rungs | wood | 1 656 | 30.3 KiB | 5.5 ms |
-| `column` | base and capital; `plain` / `tapered` / `fluted` | stone | 1 600 | 29.1 KiB | 3.3 ms |
-| `table` | top, four legs, optional apron | wood | 540 | 10.6 KiB | 2.6 ms |
-| `bench` | seat, legs, stretcher, optional back | wood | 600 | 11.7 KiB | 3.2 ms |
-| `wedge` | a ramp — the most common blocking shape in a Roblox place | stone | 8 | 1.0 KiB | 0.8 ms |
+| `crate` | recessed panels, corner posts, boards on every face; `planks` / `frame` / `plain` | wood | 1 380 | 25.7 KiB | 5.1 ms |
+| `barrel` | staved, bellied, with metal hoops | wood | 840 | 15.7 KiB | 1.5 ms |
+| `cylinder` | rod or pipe (`wall_thickness > 0`), chamfered rims | metal | 192 | 4.3 KiB | 0.6 ms |
+| `plank` | a dimensioned board | wood | 60 | 2.0 KiB | 0.5 ms |
+| `tapered_panel` | a trapezoidal one — wing, tailplane, fin, blade, body side | paint | 60 | 2.0 KiB | 0.5 ms |
+| `wall_panel` | wall section with an optional window or door, faced in real masonry | stone | 10 680 | 192.8 KiB | 38.3 ms |
+| `wheel` | chamfered tyre with hub and spokes, or a solid disc | rubber | 872 | 16.4 KiB | 2.7 ms |
+| `stairs` | `blocks` (masonry) or `open` (treads on two stringers) | stone | 360 | 7.4 KiB | 1.6 ms |
+| `ladder` | two rails and N rungs | wood | 1 656 | 30.3 KiB | 4.4 ms |
+| `column` | base and capital; `plain` / `tapered` / `fluted` | stone | 1 600 | 29.1 KiB | 1.6 ms |
+| `table` | top, four legs, optional apron | wood | 540 | 10.6 KiB | 2.3 ms |
+| `bench` | seat, legs, stretcher, optional back | wood | 600 | 11.7 KiB | 2.7 ms |
+| `wedge` | a ramp — the most common blocking shape in a Roblox place | stone | 8 | 1.0 KiB | 0.4 ms |
 
-Counts are at default parameters; they move with `sections`, `plank_count`,
-`steps` and so on. `config.PRIMITIVE_MAX_FACES` (default 20 000, Roblox's
-per-`MeshPart` cap) refuses a parameter set that would exceed it, so a scripted
-part can never be the thing that fails an import.
+### The building kit
+
+Nine new kinds, because buildings were the stated target and most of them
+compose out of the four mechanisms above.
+
+| kind | what it is | material | tris | glb | build |
+| --- | --- | --- | --- | --- | --- |
+| `archway` | gateway with an order: plinth, impost band, jointed voussoir ring, keystone, archivolt | stone | 4 774 | 86.5 KiB | 23.6 ms |
+| `battlement` | crenellated parapet: merlons, crenels, splayed copings, corbel table, arrow slits | stone | 8 684 | 157.1 KiB | 36.2 ms |
+| `roof` | gabled roof clad in overlapping courses, with ridge, eaves and barge boards; `tile` / `shingle` / `corrugated` | wood | 8 536 | 154.3 KiB | 36.3 ms |
+| `chimney` | brick stack, corbelled crown, pots | stone | 8 956 | 161.8 KiB | 35.0 ms |
+| `window` | framed light with mullions, leaded lattice or a round head; moulded sill and hood | wood | 584 | 11.4 KiB | 3.8 ms |
+| `panel_door` | stiles, rails and bolection-moulded panels; or planks on ledges under straps and clavos | wood | 1 704 | 31.2 KiB | 9.8 ms |
+| `railing` | balustrade: newels with moulded caps, a swept handrail, turned balusters | wood | 2 492 | 45.0 KiB | 6.3 ms |
+| `moulding` | a profile swept along a run — cornice, skirting, plinth, band, handrail — with mitred returns | wood | 52 | 1.9 KiB | 0.8 ms |
+| `riveted_panel` | industrial plate: recessed bays, seams, ribs or corrugation, rows of rivets and hex bolts | metal | 3 012 | 55.4 KiB | 10.4 ms |
+
+Counts are at default parameters; they move with `sections`, `course`,
+`plank_count`, `steps` and so on. `config.PRIMITIVE_MAX_FACES` (default 20 000,
+Roblox's per-`MeshPart` cap) refuses a parameter set that would exceed it, so a
+scripted part can never be the thing that fails an import — and with the
+detailed kinds that refusal is now *reachable*: a 16.8-stud `roof` at a
+0.44-stud course is 22 576 triangles and comes back a `400` naming the counts to
+reduce. That is the cap doing its job rather than a bug, but it is new.
+
+## Showcase: a gatehouse, entirely scripted
+
+![A gatehouse facade](images/procedural-gatehouse.png)
+
+Twenty-two parts, **97 682 triangles**, **370 ms** of numpy, no GPU, no
+modelling and no boolean engine. Twelve kinds: `archway`, `wall_panel`,
+`window`, `panel_door`, `moulding`, `railing`, `battlement`, `roof`, `chimney`,
+`column`, `stairs` and `plank`.
+
+| | |
+| --- | --- |
+| Parts | 22 |
+| Triangles | 97 682 total; **largest single mesh 12 016** of the 20 000 cap |
+| Parts over budget | **0** |
+| Size | 18.2 × 16.8 × 8.4 studs |
+| Build | 370 ms, single-threaded CPU |
+
+Every course of masonry, every voussoir, every baluster and every roof tile is
+real geometry rather than a texture, which is the whole reason to script it: it
+still reads at a grazing angle and under any light, where a normal map would
+not. The two floors are the same `wall_panel` kind at different `surface`,
+`course` and `seed` values, and the string course between them is one
+`moulding`.
+
+The one thing to notice about the numbers is that 97 682 would be rejected
+outright as a single mesh. It is legal because the cap is **per `MeshPart`**,
+and a kit is many parts — the same fact that made the 88-part showcase chest
+legal.
 
 **The material comes from the kind**, via `server/materials.py` — a crate is
 wood, a pipe is metal, a wall is stone, a wheel is rubber. That is strictly more
@@ -289,8 +415,10 @@ POST /assemble  [{"job_id": id, ...}]  -> a named node in the scene
 POST /export    {"scene_id": ...}      -> Roblox .glb
 ```
 
-Thirteen scripted parts assembled through the ordinary `/assemble` path —
-`OBJECTS: 13` in Blender, 12 412 triangles for the entire scene, 187 KiB:
+The original thirteen scripted parts assembled through the ordinary `/assemble`
+path — `OBJECTS: 13` in Blender, 12 412 triangles for the entire scene, 187 KiB.
+The gatehouse above went through the same path and is eight times the geometry
+for twenty-two parts:
 
 ![Assembled scene](images/procedural-scene.png)
 
@@ -325,7 +453,38 @@ Thirteen scripted parts assembled through the ordinary `/assemble` path —
   it is not a clean single-shell solid. Components are deliberately embedded in
   each other rather than placed flush, so no vertices coincide and nothing fuses
   into a non-manifold edge.
-- **These are generic.** Every crate looks like every other crate at the same
-  parameters. Variation has to come from the parameters, from `color`, or from
-  kitbashing several kinds together — that is the honest cost of the 18 000×
-  speedup, and the reason the generator is still there.
+- **Six kinds are one solid; the other sixteen are assemblies.**
+  `primitives.SINGLE_SOLID` names them — `cylinder`, `plank`, `tapered_panel`,
+  `wedge`, `column`, `moulding` — and the distinction is checked rather than
+  claimed (`test_detail.py` counts connected components with a union-find,
+  because `trimesh.body_count` wants `scipy` and this project does not install
+  it). This is the trade the whole detail layer rests on: a stud sitting *on* a
+  face is a separate closed body, so relief is nearly free and the union is
+  never a single shell. Watertightness and winding consistency hold for
+  everything; connectedness holds only for the six.
+- **`volume` is not a measure of an assembly.** Interpenetrating components
+  double-count, so a faced wall can report *more* volume than the flat one it
+  was carved out of. Measure the geometry, not the integral.
+- **The chamfer on a brick is 80 % of a faced wall's cost.** Each block is 60
+  triangles bevelled and 12 sharp, so `{"chamfer": 0}` takes `wall_panel` from
+  10 680 to 2 136 and it still reads as brick. The bevel is kept on by default
+  because it is what catches a highlight on every block edge, which is the same
+  argument `_bevel` has always made — but on a facade of twenty walls it is the
+  first dial to turn.
+- **Facings are applied to both faces.** A wall seen from one side pays twice.
+  There is no `sides` parameter and there should probably be one.
+- **A roof's tiles are canted, not curved.** Each tile is a flat box tilted so
+  its tail lifts clear of the course below; that produces the shadow line under
+  every course, which is the only thing that says "roof" from a distance. It
+  does not produce pantiles, ridge tiles with a roll, or a hipped roof — the
+  kind is gabled only.
+- **The window's glazing is off by default.** One primitive carries one
+  material, so a glazed window would be wood-coloured glass. A real build wants
+  the pane as its own part.
+- **These are still generic.** `seed` now varies the irregular facings and the
+  roof jitter, so two walls at the same parameters can differ — but every
+  `archway` is still every other `archway`, and the ornament vocabulary is seven
+  moulding profiles and four surfaces. Variation beyond that has to come from
+  the parameters, from `color`, or from kitbashing several kinds together. That
+  is the honest cost of the 18 000× speedup, and the reason the generator is
+  still there.
