@@ -18,6 +18,7 @@ face counts are exact and predictable rather than a tessellation tolerance.
 Detail is added by *composition* — a crate is a panel plus posts plus boards,
 the same kitbashing idea the rest of the project is built on.
 """
+import functools
 import itertools
 import logging
 import time
@@ -52,11 +53,26 @@ def _fan(ring: list[int]) -> list[tuple[int, int, int]]:
     return [(ring[0], ring[i], ring[i + 1]) for i in range(1, len(ring) - 1)]
 
 
+def _cross(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Row-wise cross product, spelled out.
+
+    np.cross spends more time in axis bookkeeping than in arithmetic, and this
+    runs once per face of every box in every crate.
+    """
+    return np.stack([a[:, 1] * b[:, 2] - a[:, 2] * b[:, 1],
+                     a[:, 2] * b[:, 0] - a[:, 0] * b[:, 2],
+                     a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0]], axis=1)
+
+
 def _orient_convex(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
-    """Flip faces whose normal points inward. Only valid for a convex solid
-    containing the origin, which is how the chamfered box is built."""
-    v = vertices[faces]
-    normals = np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0])
+    """Flip faces whose normal points inward. Only valid for a convex solid.
+
+    The reference point is the mean of the vertices, which is interior for any
+    convex body — so a swept panel that does not straddle the origin is judged
+    as correctly as a box that does.
+    """
+    v = vertices[faces] - vertices.mean(axis=0)
+    normals = _cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0])
     inward = np.einsum("ij,ij->i", normals, v.mean(axis=1)) < 0
     faces = faces.copy()
     faces[inward] = faces[inward][:, ::-1]
@@ -79,44 +95,136 @@ def _finish(vertices, faces) -> trimesh.Trimesh:
     return mesh
 
 
-def _box(width: float, height: float, depth: float, center=(0.0, 0.0, 0.0),
-         chamfer: float = 0.0) -> trimesh.Trimesh:
-    """A box, optionally chamfered on all twelve edges.
+@functools.lru_cache(maxsize=32)
+def _bevel_topology(rings: tuple[tuple[int, ...], ...]):
+    """Which faces meet at each corner, and the triangles a bevel makes of them.
+
+    Connectivity depends only on the rings, and a crate builds twenty-three
+    boxes with the same ones, so this is worth remembering. Returns the three
+    face ids at each corner and the finished triangle list, indexed so that
+    corner `i` keeps index `i` and its point on face `fa[i][k]` lands at
+    `V * (1 + k) + i`.
+    """
+    n_v = 1 + max(j for ring in rings for j in ring)
+    at: list[list[int]] = [[] for _ in range(n_v)]
+    for i, ring in enumerate(rings):
+        for j in ring:
+            at[j].append(i)
+    if any(len(f) != 3 for f in at):
+        raise ValueError("_bevel needs every corner to meet exactly three faces")
+
+    edges: dict[tuple[int, int], list[int]] = {}
+    for i, ring in enumerate(rings):
+        for k, a in enumerate(ring):
+            b = ring[(k + 1) % len(ring)]
+            edges.setdefault((min(a, b), max(a, b)), []).append(i)
+
+    fa = [sorted(f) for f in at]
+    slot = {(i, f): n_v * (1 + k) + i
+            for i, faces in enumerate(fa) for k, f in enumerate(faces)}
+
+    tris = []
+    for i, ring in enumerate(rings):
+        tris += _fan([slot[(j, i)] for j in ring])
+    for (a, b), (i, j) in edges.items():
+        tris += _fan([slot[(a, i)], a, slot[(a, j)],
+                      slot[(b, j)], b, slot[(b, i)]])
+    return np.array(fa), np.array(tris, dtype=np.int64)
+
+
+def _bevel(vertices, polygons, chamfer: float = 0.0) -> trimesh.Trimesh:
+    """Assemble a convex solid from planar faces, chamfering every edge.
+
+    `polygons` are rings of indices into `vertices`, one per face, wound either
+    way — winding is fixed globally at the end. Every corner must meet exactly
+    three faces, which is true of a box, a triangular prism and a trapezoidal
+    panel alike.
+
+    Cutting each edge at the bisector leaves every original face *itself*,
+    pulled in by `chamfer` along its own plane, joined by hexagonal bevels; the
+    three bevels meeting at a corner intersect at a single point rather than
+    leaving a corner facet. A box comes out 32 vertices and 60 triangles.
 
     The chamfer is what separates a prop from a placeholder — a bare cube reads
     as untextured level-blocking, while a 2 cm chamfer catches a highlight on
-    every edge and the same mesh reads as a made object. It costs 48 triangles.
+    every edge and the same mesh reads as a made object.
     """
-    extents = np.array([width, height, depth], dtype=float) / 2.0
+    v = np.asarray(vertices, dtype=float)
+    rings = tuple(tuple(p) for p in polygons)
     t = float(chamfer)
 
     if t <= _EPS:
-        mesh = trimesh.creation.box(extents=(width, height, depth))
-        mesh.apply_translation(center)
-        return mesh
+        faces = [tri for ring in rings for tri in _fan(list(ring))]
+        return trimesh.Trimesh(
+            vertices=v, faces=_orient_convex(v, np.array(faces, dtype=np.int64)),
+            process=False,
+        )
 
-    # A chamfer wider than half the thinnest dimension has eaten the face it
-    # was supposed to bevel.
-    t = min(t, float(extents.min()) * 0.49)
+    # One outward plane per face. The centroid of a convex body's vertices is
+    # inside it, which is all "outward" needs to mean here.
+    inside = v.mean(axis=0)
+    corners = v[[r[0] for r in rings]]
+    normals = _cross(v[[r[1] for r in rings]] - corners,
+                     v[[r[2] for r in rings]] - corners)
+    normals /= np.linalg.norm(normals, axis=1)[:, None]
+    outward = np.einsum("ij,ij->i", normals, corners - inside)
+    normals *= np.where(outward > 0, 1.0, -1.0)[:, None]
+    offsets = np.einsum("ij,ij->i", normals, corners)
 
-    # Cutting all twelve edges at 45 degrees leaves each original face a
-    # *rectangle* pulled in by t, joined by hexagonal bevels; the three bevels
-    # meeting at a corner intersect at a single point rather than leaving a
-    # corner facet. 32 vertices, 60 triangles.
-    corner: dict[tuple, int] = {}
-    face_v: dict[tuple, int] = {}
-    verts: list[list[float]] = []
-    for s in itertools.product((1, -1), repeat=3):
-        for full in range(3):
-            v = [s[k] * (extents[k] - t) for k in range(3)]
-            v[full] = s[full] * extents[full]
-            face_v[(s, full)] = len(verts)
-            verts.append(v)
-        corner[s] = len(verts)
-        verts.append([s[k] * (extents[k] - t / 2) for k in range(3)])
+    n_v = len(v)
+    fa, tris = _bevel_topology(rings)     # (V, 3) face ids per corner
+    nn, dd = normals[fa], offsets[fa]
 
-    faces: list[tuple[int, int, int]] = []
+    # Four new points per corner: the one where its three bevels meet, and one
+    # on each of its three faces. Each is the meeting of three planes whose
+    # offsets are affine in t, so it travels in a straight line as the chamfer
+    # widens — solving with t as a second right-hand side gives both where it
+    # starts (the original corner) and the direction it leaves in, which is
+    # what makes the clamp below exact rather than a guess.
+    #
+    # The bevel between faces i and j contains both of their inset lines, which
+    # puts it at (n_i + n_j).p = d_i + d_j - t; three of those meet at a corner.
+    # A face point is simpler: on its own face, inset from the other two.
+    rows = [nn + nn[:, [1, 2, 0]]]
+    base = [dd + dd[:, [1, 2, 0]]]
+    slope = [np.full(3, -1.0)]
+    for k in range(3):
+        cyc = [k, (k + 1) % 3, (k + 2) % 3]
+        rows.append(nn[:, cyc])
+        base.append(dd[:, cyc])
+        slope.append(np.array([0.0, -1.0, -1.0]))
+    rhs = np.stack([np.concatenate(base), np.repeat(slope, n_v, axis=0)], axis=-1)
+    moves = np.linalg.solve(np.concatenate(rows), rhs)
 
+    # A chamfer wider than the solid's own waist eats the face it was supposed
+    # to bevel. The largest t that keeps every new point inside the original
+    # planes is a plain linear bound; 0.49 of half of it is the same margin the
+    # chamfered box has always used, and unlike a bound taken from the bounding
+    # box it tightens on its own at an acute corner.
+    travel = moves[..., 1] @ normals.T
+    slack = offsets - moves[..., 0] @ normals.T
+    live = travel > 1e-9
+    if live.any():
+        t = min(t, float((np.maximum(slack[live], 0.0) / travel[live]).min()) * 0.245)
+
+    verts = moves[..., 0] + t * moves[..., 1]
+    return trimesh.Trimesh(
+        vertices=verts, faces=_orient_convex(verts, tris), process=False,
+    )
+
+
+# The eight (x, y, z) sign triples, in one fixed order every hexahedron uses.
+_HEX = np.array(list(itertools.product((1, -1), repeat=3)))
+
+
+def _hex_rings() -> tuple[tuple[int, ...], ...]:
+    """The six quads of a hexahedron, over corners in `_HEX` order.
+
+    Face (axis, sign) is the four corners sharing that sign on that axis, taken
+    round the other two axes so the ring is a genuine cycle.
+    """
+    index = {tuple(s): i for i, s in enumerate(_HEX.tolist())}
+    rings = []
     for d in range(3):
         u, w = (d + 1) % 3, (d + 2) % 3
         for sd in (1, -1):
@@ -124,27 +232,35 @@ def _box(width: float, height: float, depth: float, center=(0.0, 0.0, 0.0),
             for su, sw in ((1, 1), (-1, 1), (-1, -1), (1, -1)):
                 s = [0, 0, 0]
                 s[d], s[u], s[w] = sd, su, sw
-                ring.append(face_v[(tuple(s), d)])
-            faces += _fan(ring)
+                ring.append(index[tuple(s)])
+            rings.append(tuple(ring))
+    return tuple(rings)
 
-    for axis in range(3):
-        u, w = (axis + 1) % 3, (axis + 2) % 3
-        for su, sw in itertools.product((1, -1), repeat=2):
-            ends = []
-            for sa in (1, -1):
-                s = [0, 0, 0]
-                s[axis], s[u], s[w] = sa, su, sw
-                ends.append(tuple(s))
-            hi, lo = ends
-            faces += _fan([face_v[(hi, u)], corner[hi], face_v[(hi, w)],
-                           face_v[(lo, w)], corner[lo], face_v[(lo, u)]])
 
-    vertices = np.array(verts, dtype=float)
-    mesh = trimesh.Trimesh(
-        vertices=vertices,
-        faces=_orient_convex(vertices, np.array(faces, dtype=np.int64)),
-        process=False,
-    )
+_HEX_RINGS = _hex_rings()
+
+
+def _hexahedron(corners, chamfer: float = 0.0) -> trimesh.Trimesh:
+    """A six-faced cell from eight corners given in `_HEX` order.
+
+    A box with its corners moved: as long as each of the three pairs of
+    opposite faces stays planar it is still six quads and still bevels. That is
+    what lets a tapered panel reuse the box's chamfer instead of inventing one.
+    """
+    return _bevel(corners, _HEX_RINGS, chamfer)
+
+
+def _box(width: float, height: float, depth: float, center=(0.0, 0.0, 0.0),
+         chamfer: float = 0.0) -> trimesh.Trimesh:
+    """A box, optionally chamfered on all twelve edges. 60 triangles bevelled,
+    12 without — the 48 the bevel costs are the cheapest detail in the file."""
+    if float(chamfer) <= _EPS:
+        mesh = trimesh.creation.box(extents=(width, height, depth))
+        mesh.apply_translation(center)
+        return mesh
+
+    extents = np.array([width, height, depth], dtype=float) / 2.0
+    mesh = _hexahedron(_HEX * extents, chamfer)
     mesh.apply_translation(center)
     return mesh
 
@@ -185,11 +301,20 @@ def _revolve(profile, sections: int, modulation=None) -> trimesh.Trimesh:
     return _finish(verts, faces)
 
 
-def _prism(polygon, width: float) -> trimesh.Trimesh:
-    """Extrude a convex (z, y) polygon along X. Fan-triangulated, so convex only."""
+def _prism(polygon, width: float, chamfer: float = 0.0) -> trimesh.Trimesh:
+    """Extrude a convex (z, y) polygon along X. Fan-triangulated, so convex only.
+
+    Every corner of an extrusion meets one cap and two sides, so `_bevel` can
+    take it — which is how a ramp gets the same edge treatment as a slab
+    instead of meeting one with a knife edge.
+    """
     n = len(polygon)
     verts = [(-width / 2.0, y, z) for z, y in polygon]
     verts += [(width / 2.0, y, z) for z, y in polygon]
+    if float(chamfer) > _EPS:
+        rings = [list(range(n)), list(range(n, 2 * n))]
+        rings += [[i, (i + 1) % n, n + (i + 1) % n, n + i] for i in range(n)]
+        return _bevel(verts, rings, chamfer)
     # The -X cap is wound against the direction the side quads travel, which is
     # what makes the two agree on which way is out.
     faces = _fan(list(range(n))[::-1]) + _fan(list(range(n, 2 * n)))
@@ -451,6 +576,31 @@ def _plank(length, width, thickness, chamfer):
     return _box(length, thickness, width, chamfer=chamfer)
 
 
+def _tapered_panel(span, root_chord, tip_chord, thickness, sweep,
+                   thickness_taper, chamfer):
+    """A trapezoidal panel — a wing, tailplane, fin, rotor blade or body side.
+
+    Same axes as `plank`: span along X with the root at -X, chord along Z,
+    thickness along Y. With `root_chord == tip_chord` and no thickness taper it
+    *is* a plank, which is the point — one kind covers the constant-section
+    case and the tapered one, and nobody has to butt two planks together and
+    live with the step in the planform where they meet.
+
+    Chord and thickness both vary linearly with span, so all six faces stay
+    planar and this is a `_hexahedron`. It is deliberately not a `_prism`: the
+    moment `thickness_taper` is nonzero the top and bottom faces slant and the
+    cross-section is no longer constant along any axis.
+    """
+    tip = _HEX[:, 0] > 0
+    chord = np.where(tip, tip_chord, root_chord)
+    thick = np.where(tip, thickness * (1.0 - thickness_taper), thickness)
+    offset = np.where(tip, sweep, 0.0)
+    return _hexahedron(np.stack([_HEX[:, 0] * span / 2.0,
+                                 _HEX[:, 1] * thick / 2.0,
+                                 offset + _HEX[:, 2] * chord / 2.0], axis=1),
+                       chamfer)
+
+
 def _wall_panel(width, height, thickness, opening, opening_width, opening_height,
                 sill_height, trim, trim_depth, chamfer):
     """A wall section, optionally with a window or a door cut through it.
@@ -700,13 +850,13 @@ def _bench(length, depth, height, seat_thickness, leg_thickness, backrest,
     return _combine(parts)
 
 
-def _wedge(width, height, depth, flip):
+def _wedge(width, height, depth, flip, chamfer):
     """A ramp. The single most common blocking shape in a Roblox place."""
     z = depth / 2
     poly = [(-z, -height / 2), (z, -height / 2), (z, height / 2)]
     if flip:
         poly = [(-z, -height / 2), (z, -height / 2), (-z, height / 2)]
-    return _prism(poly, width)
+    return _prism(poly, width, chamfer)
 
 
 # --- catalogue ---------------------------------------------------------------
@@ -775,6 +925,34 @@ _register(Kind(
         _studs("length", 4.0, "X extent."),
         _studs("width", 0.8, "Z extent."),
         _studs("thickness", 0.12, "Y extent."),
+        CHAMFER,
+    ),
+))
+
+_register(Kind(
+    "tapered_panel",
+    "Trapezoidal panel: wing, tailplane, fin, rotor blade or vehicle body side.",
+    # Every word in that summary is a keyword materials.py already reads as
+    # paint, so the kind's default agrees with the name-derived guess instead of
+    # fighting it.
+    "paint", _tapered_panel,
+    (
+        _studs("span", 4.0, "X extent. Root at -X, tip at +X."),
+        _studs("root_chord", 1.2, "Z extent at the root."),
+        _studs("tip_chord", 0.6,
+               "Z extent at the tip. Equal to root_chord gives a plain plank."),
+        _studs("thickness", 0.16, "Y extent at the root."),
+        _studs("sweep", 0.0,
+               "How far the tip is offset along +Z. 0 tapers symmetrically "
+               "about the mid-chord; +(root_chord - tip_chord)/2 lines the +Z "
+               "edges up and the negative of that lines up the -Z ones, which "
+               "is how a wing keeps one edge dead straight. More than that "
+               "rakes the whole panel back.",
+               minimum=-200.0, maximum=200.0),
+        Param("thickness_taper", "number", 0.0,
+              "Fraction of the thickness lost at the tip. Holding thickness/"
+              "chord constant on a wing wants 1 - tip_chord/root_chord.",
+              minimum=0.0, maximum=0.9),
         CHAMFER,
     ),
 ))
@@ -916,6 +1094,19 @@ _register(Kind(
         _studs("height", 2.0, "Y extent."),
         _studs("depth", 4.0, "Z extent, the run of the slope."),
         Param("flip", "boolean", False, "Put the high edge at -Z instead of +Z."),
+        # Every other kind bevels by default. A ramp cannot, and the reason is
+        # dimensional rather than aesthetic: its apex and its toe are the
+        # extremes of the bounding box, so cutting them is the one chamfer in
+        # this file that shortens the thing it is applied to — by t/tan(half the
+        # edge angle), which on a shallow ramp is several times t. A ramp is
+        # blocking geometry that has to meet a floor, so it keeps its exact rise
+        # and run unless the caller says otherwise.
+        _studs("chamfer", 0.0,
+               "Bevel on every edge. Off by default because it truncates the "
+               "ramp's apex and toe, which are its own extents — set it to the "
+               "chamfer of the slab this abuts (0.02-0.04) when the ramp is a "
+               "fin or a fairing rather than blocking.",
+               minimum=0.0, maximum=10.0),
     ),
 ))
 

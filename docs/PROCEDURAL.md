@@ -70,8 +70,8 @@ than living in separate systems — see *Interchangeability* below.
 
 There is also a second, quieter argument. Roblox enforces **20 000 triangles per
 `MeshPart`**, so a generated part spends its entire budget and a scripted one
-spends 0.3–8 % of it. The whole catalogue at default parameters — all twelve
-kinds — is **8 828 triangles**, less than half of what one generated crate costs.
+spends 0.3–8 % of it. The whole catalogue at default parameters — all thirteen
+kinds — is **8 888 triangles**, less than half of what one generated crate costs.
 
 ## build123d vs. trimesh
 
@@ -122,13 +122,23 @@ of three ways:
   a uniform bevel on all twelve edges the six faces stay *rectangles* pulled in
   by the chamfer, joined by hexagonal bevel facets, and the three bevels meeting
   at each corner intersect at a single point rather than leaving a corner facet.
-  32 vertices, 60 triangles, exactly.
+  32 vertices, 60 triangles, exactly. `_hexahedron(corners, chamfer)` is the
+  same thing with the corners moved — six planar faces that are no longer
+  square to anything, which is what a tapered panel is.
 - `_revolve(profile, sections, modulation)` — a closed `(radius, height)`
   profile swept around +Y, with an optional per-section radial multiplier. That
   multiplier is what makes a barrel staved and a column fluted without a single
   boolean, and a per-point flag keeps the modulation off the rings that should
   stay round.
-- `_prism(polygon, width)` — a convex polygon extruded along X.
+- `_prism(polygon, width, chamfer)` — a convex polygon extruded along X.
+
+The bevel itself is written once, in `_bevel`, and is not specific to a box:
+give it any convex solid whose every corner meets exactly three faces and it
+offsets each face plane inward, meets the neighbours in a hexagon, and solves
+for the point where each corner's three bevels intersect. A box, a triangular
+prism and a trapezoidal panel are all that shape, so all three bevel
+identically — and `_bevel` reproduces the old hand-written chamfered box vertex
+for vertex, including where it clamps a chamfer wider than the solid.
 
 **Detail comes from composition, not subtraction.** A crate is a recessed core
 plus corner posts plus boards; a wall's window is the four slabs around the
@@ -138,11 +148,12 @@ the same kitbashing idea the rest of the project is built on.
 
 Every kind is asserted watertight, winding-consistent, free of degenerate
 triangles, and dimensioned to what was requested — see
-`server/tests/test_primitives.py`.
+`server/tests/test_primitives.py`, and *Honest limits* for the one place a
+bevel is allowed to move a bounding box.
 
 ## The catalogue
 
-Twelve kinds. Every dimension is in **studs** (1 file unit = 1 stud, matching
+Thirteen kinds. Every dimension is in **studs** (1 file unit = 1 stud, matching
 `/export`), and every part is centred on its bounding-box origin, matching
 generated parts so `/assemble`'s placement maths does not have to branch.
 
@@ -152,6 +163,7 @@ generated parts so `/assemble`'s placement maths does not have to branch.
 | `barrel` | staved, bellied, with metal hoops | wood | 840 | 15.7 KiB | 2.9 ms |
 | `cylinder` | rod or pipe (`wall_thickness > 0`), chamfered rims | metal | 192 | 4.3 KiB | 1.5 ms |
 | `plank` | a dimensioned board | wood | 60 | 2.0 KiB | 0.9 ms |
+| `tapered_panel` | a trapezoidal one — wing, tailplane, fin, blade, body side | paint | 60 | 2.0 KiB | 0.9 ms |
 | `wall_panel` | wall section with an optional window or door, and trim | stone | 720 | 13.8 KiB | 2.7 ms |
 | `wheel` | chamfered tyre with hub and spokes, or a solid disc | rubber | 872 | 16.4 KiB | 2.8 ms |
 | `stairs` | `blocks` (masonry) or `open` (treads on two stringers) | stone | 360 | 7.4 KiB | 1.8 ms |
@@ -170,6 +182,50 @@ part can never be the thing that fails an import.
 wood, a pipe is metal, a wall is stone, a wheel is rubber. That is strictly more
 information than the name-keyword guess a generated part gets, because the kind
 *is* the material fact. `material` and `color` on the request override it.
+
+### Taper is one part, not two
+
+`tapered_panel` was added after an agent built a whole aircraft's flight
+surfaces out of this library and reported that the one thing it could not say
+was "narrower at the far end". Wings, tailplanes, fins, rotor blades, boat hulls
+and most vehicle body panels all taper, and with only the constant-section
+`plank` the only way to suggest it is to butt two planks of different sizes
+together. Seen from any angle but directly above that is convincing. Seen from
+directly above — which for a wing is the diagnostic view — it is a staircase:
+
+![Two planks against one tapered panel](images/procedural-taper.png)
+
+Both rows are the same wing: 4.4 m semi-span, 2.1 m root chord, 1.1 m tip
+chord, 15 % thickness/chord. Measuring the chord at sixty stations across the
+span, the two-plank version holds it constant and then drops **0.70 m at a
+single station**; the panel's largest step between neighbouring stations is
+0.0166 m, which is exactly the smooth gradient. It is also half the triangles
+and half the parts, and the head-on view gets a real thickness taper for free
+because `thickness_taper` costs nothing extra.
+
+```json
+{"kind": "tapered_panel",
+ "params": {"span": 4.4, "root_chord": 2.1, "tip_chord": 1.1,
+            "thickness": 0.315, "thickness_taper": 0.48, "sweep": -0.5}}
+```
+
+`span` runs along X with the root at −X, chord along Z, thickness along Y —
+the same axes as `plank`, which it *is* when the two chords are equal: same 60
+triangles, same volume, same envelope. `sweep` offsets the tip along the chord
+axis, and ±(root − tip)/2 is the value that lines one edge up dead straight,
+which is what a wing with an unswept leading or trailing edge wants.
+
+The same report noted that `wedge` was the only kind that took no `chamfer`, so
+a wedge fin met a bevelled slab with a knife edge. It takes one now. It is the
+one kind where the bevel is **off by default**, and the reason is dimensional
+rather than aesthetic: a ramp's apex and toe *are* its bounding box, so cutting
+them shortens the rise and run it was asked for — by `chamfer / tan(half the
+edge angle)`, which on a shallow ramp is several times the chamfer. A ramp is
+blocking geometry that has to meet a floor, so it keeps its exact envelope
+unless the caller asks otherwise. A thickness taper on the wedge did *not* come
+for free and was not added: taper a triangular prism along its length and its
+sloped face stops being planar, which is the one thing `_bevel` needs. A
+thickness-tapered fin is a `tapered_panel` stood on its end.
 
 ## The API
 
@@ -253,6 +309,13 @@ Thirteen scripted parts assembled through the ordinary `/assemble` path —
 - **No fillets, only chamfers.** See the build123d section. A bevel reads well
   on props and costs 48 extra triangles; a true rounded edge does not come out
   of composition.
+- **A bevel on a face that is not square to an axis shortens the envelope.**
+  Every extent here is exact to the request, with one bounded exception: where
+  an extreme of the bounding box *is* a bevelled corner, cutting the corner
+  moves it. On a `tapered_panel` that costs `chamfer` × the taper slope — 0.007
+  on the 2.1 m wing above, a third of a percent — and it is why `wedge`, whose
+  apex and toe are far sharper corners, does not bevel by default. Span,
+  thickness and every axis-aligned face stay exact.
 - **`_prism` fan-triangulates, so it is convex-only.** Anything concave has to
   be composed out of convex pieces — which is why `stairs` stacks boxes rather
   than extruding a staircase silhouette.

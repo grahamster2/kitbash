@@ -106,6 +106,149 @@ def test_plank_dimensions_map_to_the_named_axes():
     assert mesh.extents == pytest.approx([6.0, 0.2, 0.5])
 
 
+# --- the tapered panel -------------------------------------------------------
+#
+# The kind exists because a wing, a tailplane, a fin and a rotor blade all
+# taper, and faking that with two planks butted together gives a two-step
+# planform and twice the parts. So the things worth failing a build over are
+# the chord at each end being what was asked for, and the edge between them
+# being one straight line.
+
+WING = {"span": 4.4, "root_chord": 2.1, "tip_chord": 1.1, "thickness": 0.315}
+
+
+def _station(mesh, x):
+    """The chord and thickness of the panel at one spanwise station."""
+    at = mesh.vertices[np.abs(mesh.vertices[:, 0] - x) < 1e-6]
+    return np.ptp(at[:, 2]), np.ptp(at[:, 1])
+
+
+def test_a_tapered_panel_has_the_chord_it_was_asked_for_at_each_end():
+    mesh = primitives.build("tapered_panel", {**WING, "chamfer": 0.0})
+
+    assert mesh.extents == pytest.approx([4.4, 0.315, 2.1])
+    assert _station(mesh, -2.2) == pytest.approx([2.1, 0.315])
+    assert _station(mesh, 2.2) == pytest.approx([1.1, 0.315])
+
+
+def test_equal_chords_degenerate_to_exactly_a_plank():
+    """The reason this is one kind and not two: with no taper asked for, the
+    panel is not merely plank-like, it is the same 60 triangles."""
+    panel = primitives.build(
+        "tapered_panel",
+        {"span": 6.0, "root_chord": 0.5, "tip_chord": 0.5, "thickness": 0.2},
+    )
+    plank = primitives.build(
+        "plank", {"length": 6.0, "width": 0.5, "thickness": 0.2}
+    )
+
+    assert panel.extents == pytest.approx(plank.extents)
+    assert panel.volume == pytest.approx(plank.volume)
+    assert len(panel.faces) == len(plank.faces)
+
+
+def test_one_tapered_panel_costs_what_one_plank_costs_not_two():
+    panel = primitives.build("tapered_panel", WING)
+    plank = primitives.build("plank")
+
+    assert len(panel.faces) == len(plank.faces)
+
+
+def test_a_swept_panel_keeps_one_edge_dead_straight():
+    """The whole complaint about the two-plank fake: seen from above the
+    planform steps where the parts meet. A trapezoid cannot step."""
+    sweep = (WING["root_chord"] - WING["tip_chord"]) / 2
+    mesh = primitives.build(
+        "tapered_panel", {**WING, "sweep": sweep, "chamfer": 0.0}
+    )
+    span = WING["span"] / 2
+
+    # The +Z edge is at the same chordwise station at root and tip, so every
+    # vertex on it lies on one line rather than two offset ones.
+    assert mesh.vertices[:, 2].max() == pytest.approx(WING["root_chord"] / 2)
+    trailing = mesh.vertices[
+        mesh.vertices[:, 2] > mesh.vertices[:, 2].max() - 1e-6]
+    assert sorted(np.round(trailing[:, 0], 9)) == pytest.approx(
+        [-span, -span, span, span])
+    assert _station(mesh, span) == pytest.approx([WING["tip_chord"], 0.315])
+
+
+def test_sweep_moves_the_tip_without_resizing_it():
+    straight = primitives.build("tapered_panel", {**WING, "chamfer": 0.0})
+    raked = primitives.build(
+        "tapered_panel", {**WING, "sweep": 1.4, "chamfer": 0.0})
+
+    assert _station(raked, 2.2) == pytest.approx(_station(straight, 2.2))
+    assert raked.volume == pytest.approx(straight.volume)
+    # The envelope grows because the tip has moved out past the root, not
+    # because the tip got any bigger.
+    assert raked.extents[2] == pytest.approx(1.4 + 1.1 / 2 + 2.1 / 2)
+
+
+def test_thickness_taper_thins_the_tip_and_leaves_the_root_alone():
+    mesh = primitives.build(
+        "tapered_panel", {**WING, "thickness_taper": 1 - 1.1 / 2.1, "chamfer": 0.0}
+    )
+
+    # A constant thickness/chord ratio: 15% of the chord at both ends.
+    assert _station(mesh, -2.2)[1] == pytest.approx(0.315)
+    assert _station(mesh, 2.2)[1] == pytest.approx(0.165)
+    assert mesh.extents[1] == pytest.approx(0.315)
+
+
+@pytest.mark.parametrize("params", [
+    {},
+    {"tip_chord": 0.01},                       # very nearly a point
+    {"thickness": 0.01, "chamfer": 0.5},       # chamfer far wider than the part
+    {"sweep": -40.0},                          # raked forward past its own root
+    {"thickness_taper": 0.9, "chamfer": 0.06},
+    {"root_chord": 0.6, "tip_chord": 3.0},     # tapering the other way
+])
+def test_a_tapered_panel_stays_a_closed_solid_however_it_is_shaped(params):
+    mesh = primitives.build("tapered_panel", params)
+
+    assert mesh.is_watertight
+    assert mesh.is_winding_consistent
+    assert mesh.volume > 0
+    assert mesh.area_faces.min() > 1e-9
+
+
+def test_the_bevel_only_nibbles_the_planform_corners():
+    """A chamfer cuts corners, and on a tapered panel two of those corners are
+    the extremes of the chord. It costs `chamfer` times the taper slope — small,
+    but it is the one dimension here that is not exact to the request."""
+    sharp = primitives.build("tapered_panel", {**WING, "chamfer": 0.0})
+    bevelled = primitives.build("tapered_panel", {**WING, "chamfer": 0.03})
+    slope = (WING["root_chord"] - WING["tip_chord"]) / WING["span"]
+
+    assert bevelled.extents[0] == pytest.approx(sharp.extents[0])
+    assert bevelled.extents[1] == pytest.approx(sharp.extents[1])
+    assert bevelled.extents[2] == pytest.approx(2.1 - 0.03 * slope, abs=1e-9)
+    assert bevelled.volume < sharp.volume
+
+
+def test_a_panel_is_painted_because_a_wing_is():
+    assert primitives.build("tapered_panel").visual.material.name == "kitbash_paint"
+
+
+def test_a_tip_chord_of_zero_is_rejected_rather_than_built_as_a_knife():
+    with pytest.raises(ValueError, match=">= 0.01"):
+        primitives.resolve("tapered_panel", {"tip_chord": 0.0})
+
+
+def test_sweep_may_be_negative_where_a_dimension_may_not():
+    assert primitives.resolve("tapered_panel", {"sweep": -1.5})["sweep"] == -1.5
+    with pytest.raises(ValueError, match=">= 0.01"):
+        primitives.resolve("tapered_panel", {"root_chord": -1.5})
+
+
+def test_a_thickness_taper_that_would_close_the_tip_is_rejected():
+    with pytest.raises(ValueError, match="<= 0.9"):
+        primitives.resolve("tapered_panel", {"thickness_taper": 1.0})
+
+
+# --- everything else ---------------------------------------------------------
+
 def test_cylinder_height_is_exact_and_radius_is_the_circumscribed_one():
     mesh = primitives.build(
         "cylinder", {"radius": 0.75, "height": 4.0, "chamfer": 0.0, "sections": 64}
@@ -218,6 +361,46 @@ def test_wedge_is_half_the_volume_of_its_bounding_box():
 
     assert mesh.extents == pytest.approx([4.0, 2.0, 3.0])
     assert mesh.volume == pytest.approx(4.0 * 2.0 * 3.0 / 2)
+
+
+def test_a_wedge_is_sharp_by_default_because_its_extremes_are_its_corners():
+    """Every other kind bevels by default; this one must not. The apex and toe
+    of a ramp *are* its bounding box, so a bevel shortens the rise and run it
+    was asked for — and a ramp is the shape that has to meet a floor."""
+    mesh = primitives.build("wedge", {"width": 4.0, "height": 2.0, "depth": 3.0})
+
+    assert mesh.extents == pytest.approx([4.0, 2.0, 3.0])
+    assert len(mesh.faces) == 8
+
+
+def test_a_chamfered_wedge_loses_its_knife_edge():
+    sharp = primitives.build("wedge", {"height": 2.0, "depth": 4.0})
+    bevelled = primitives.build("wedge", {"height": 2.0, "depth": 4.0,
+                                          "chamfer": 0.04})
+
+    assert bevelled.is_watertight and bevelled.is_winding_consistent
+    assert bevelled.area_faces.min() > 1e-9
+    # The 26 degree edge where the slope meets the floor turned two normals
+    # nearly back on each other, 153 degrees; the bevel splits that crease.
+    assert sharp.face_adjacency_angles.max() > 2.5
+    assert bevelled.face_adjacency_angles.max() < sharp.face_adjacency_angles.max() * 0.6
+    # And it is a bevel, not a scale: it only ever removes material.
+    assert bevelled.volume < sharp.volume
+
+
+def test_a_chamfered_wedge_meets_a_chamfered_slab_at_the_same_bevel():
+    """The mismatch this was added for: a wedge fin against a slab with a 0.04
+    bevel. Given the same chamfer they now cut the same amount off an edge."""
+    slab = primitives.build("plank", {"length": 2.0, "width": 2.0,
+                                      "thickness": 2.0, "chamfer": 0.04})
+    wedge = primitives.build("wedge", {"width": 2.0, "height": 2.0,
+                                       "depth": 2.0, "chamfer": 0.04})
+    # Both have a square corner where +X, -Y and +Z meet. Bevelled, the point
+    # sitting on the +X face there is pulled 0.04 off the other two on each.
+    for mesh in (slab, wedge):
+        (lo, hi) = mesh.bounds
+        corner = np.array([hi[0], lo[1] + 0.04, hi[2] - 0.04])
+        assert np.abs(mesh.vertices - corner).max(axis=1).min() < 1e-9
 
 
 def test_a_flipped_wedge_mirrors_rather_than_changing_size():
