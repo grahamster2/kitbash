@@ -62,6 +62,10 @@ new GLTFLoader().parse(b64ToBuffer(window.__MODEL_B64__), "", (gltf) => {
     if (!o.isMesh) return;
     // Every primitive shares one cached material, so tinting one would tint all.
     o.material = o.material.clone();
+    // Generated shells are not watertight and their winding is inconsistent, so
+    // a single-sided material culls backfaces and the mesh reads as shredded.
+    o.material.side = THREE.DoubleSide;
+    o.material.flatShading = false;
     parts.push(o);
     totalTris += tris(o);
   });
