@@ -166,6 +166,122 @@ def test_incidental_shared_words_do_not_trip_the_guard():
     assert decompose.style_leaks(p) == []
 
 
+# --- real-world size --------------------------------------------------------
+#
+# The generator normalises every mesh to a unit box, so nothing downstream knows
+# that a strut is smaller than a fuselage. `size_m` is the only place that fact
+# can enter the system.
+
+
+def test_a_size_may_be_a_single_longest_dimension():
+    """The friendly form: a propeller is 2 m across and has no long axis."""
+    p = decompose.Plan.from_dict(plan(parts=[
+        {"name": "prop", "prompt": "three blades", "size_m": 2.0},
+    ]))
+
+    assert decompose.part_length(p.parts[0]) == 2.0
+    assert decompose.part_extents(p.parts[0]) is None
+
+
+def test_a_size_may_be_extents_and_the_longest_of_them_drives_the_scale():
+    p = decompose.Plan.from_dict(plan(parts=[
+        {"name": "wing", "prompt": "a panel", "size_m": [4.4, 0.25, 1.4]},
+    ]))
+
+    assert decompose.part_extents(p.parts[0]) == [4.4, 0.25, 1.4]
+    assert decompose.part_length(p.parts[0]) == 4.4
+
+
+def test_one_unit_is_one_metre_unless_a_reference_part_says_otherwise():
+    p = decompose.Plan.from_dict(plan(parts=[
+        {"name": "wing", "prompt": "a panel", "size_m": 4.4},
+    ]))
+
+    assert decompose.unit_metres(p) == 1.0
+    assert decompose.part_scale(p, p.parts[0]) == 4.4
+
+
+def test_a_scale_reference_makes_every_number_a_ratio_of_one_part():
+    """"the wing is half a fuselage" is checkable by eye; "0.5238" is not."""
+    p = decompose.Plan.from_dict(plan(scale_reference="fuselage", parts=[
+        {"name": "fuselage", "prompt": "a shell", "size_m": 8.4},
+        {"name": "wing", "prompt": "a panel", "size_m": 4.2},
+    ]))
+
+    assert decompose.scales(p) == {"fuselage": 1.0, "wing": 0.5}
+
+
+def test_a_scripted_part_is_measured_rather_than_assumed_to_be_a_unit_box():
+    """A primitive is built at whatever its params say. Declaring the same
+    numbers as the params must therefore be a no-op, not a 3.2x blow-up."""
+    p = decompose.Plan.from_dict(plan(parts=[
+        {"name": "bed", "mode": "script", "kind": "crate",
+         "params": {"width": 3.2, "height": 0.7, "depth": 1.8},
+         "size_m": [3.2, 0.7, 1.8]},
+    ]))
+
+    assert decompose.part_scale(p, p.parts[0]) == 1.0
+
+
+def test_a_primitive_drawn_at_unit_span_is_scaled_like_a_generated_part():
+    """Which is what lets a plan draw its primitives at any convenient size —
+    the Bonanza's gear is drawn 1.0 long, the cart's axle is drawn 2.1 m."""
+    p = decompose.Plan.from_dict(plan(parts=[
+        {"name": "strut", "mode": "script", "kind": "cylinder",
+         "params": {"radius": 0.055, "height": 1.0}, "size_m": 0.9},
+    ]))
+
+    assert decompose.part_scale(p, p.parts[0]) == 0.9
+
+
+def test_a_mirrored_part_gets_no_scale_because_it_inherits_one():
+    """assemble.py takes a mirror's whole transform from its source. A scale of
+    its own would be applied on top of the source's, squaring it."""
+    result = decompose.run(decompose.BONANZA, backend=FakeBackend())
+
+    by_name = {p["name"]: p for p in result["assemble_request"]}
+    assert "scale" not in by_name["right_wing"]
+    assert by_name["left_wing"]["scale"] == round(4.4 / 8.4, 6)
+
+
+def test_the_assemble_request_carries_the_scale_so_nobody_computes_it_by_hand():
+    """The gap this closes: the Bonanza's twelve scales were supplied by a
+    throwaway script, which meant every new object hit the same wall."""
+    result = decompose.run(decompose.BONANZA, backend=FakeBackend())
+
+    by_name = {p["name"]: p for p in result["assemble_request"]}
+    assert by_name["fuselage"]["scale"] == 1.0
+    assert round(by_name["propeller"]["scale"], 4) == 0.2381
+    assert round(by_name["left_gear_wheel"]["scale"], 4) == 0.0655
+
+
+def test_a_part_with_no_size_gets_no_scale_rather_than_a_guessed_one():
+    result = decompose.run(plan(), backend=FakeBackend())
+
+    assert "scale" not in result["assemble_request"][0]
+
+
+def test_an_orient_that_defers_to_the_declared_size_is_expanded():
+    """orient.py takes a bare [x, y, z] of target extents, which is exactly what
+    size_m already is — so the three numbers are written once."""
+    result = decompose.run(plan(parts=[
+        {"name": "wing", "prompt": "a panel", "size_m": [4.4, 0.25, 1.4],
+         "placement": {"orient": True}},
+    ]), backend=FakeBackend())
+
+    assert result["assemble_request"][0]["orient"] == [4.4, 0.25, 1.4]
+
+
+def test_orienting_to_a_single_length_says_why_it_cannot():
+    p = decompose.Plan.from_dict(plan(parts=[
+        {"name": "wing", "prompt": "a panel", "size_m": 4.4,
+         "placement": {"orient": True}},
+    ]))
+
+    with pytest.raises(decompose.DecomposeError, match="ratios"):
+        decompose.validate(p)
+
+
 # --- validation -------------------------------------------------------------
 
 
@@ -272,7 +388,91 @@ def test_anchoring_to_an_unknown_part_is_caught_here_not_in_assembly():
 
 def test_anchoring_to_the_ground_is_allowed():
     p = decompose.Plan.from_dict(plan(parts=[
-        {"name": "wing", "prompt": "a panel", "placement": {"anchor": {"to": "ground"}}},
+        {"name": "wing", "prompt": "a panel", "size_m": 1.0,
+         "placement": {"anchor": {"to": "ground"}}},
+    ]))
+
+    assert decompose.validate(p) == []
+
+
+def test_a_size_in_millimetres_is_caught_in_a_millisecond_not_eight_minutes():
+    """The mistake an LLM actually makes with a field called `size_m`."""
+    p = decompose.Plan.from_dict(plan(parts=[
+        {"name": "wing", "prompt": "a panel", "size_m": 4400},
+    ]))
+
+    with pytest.raises(decompose.DecomposeError, match="millimetres"):
+        decompose.validate(p)
+
+
+def test_a_size_of_zero_is_rejected():
+    p = decompose.Plan.from_dict(plan(parts=[
+        {"name": "wing", "prompt": "a panel", "size_m": [4.4, 0, 1.4]},
+    ]))
+
+    with pytest.raises(decompose.DecomposeError, match="positive"):
+        decompose.validate(p)
+
+
+def test_a_two_number_size_is_rejected_rather_than_read_as_two_of_three():
+    p = decompose.Plan.from_dict(plan(parts=[
+        {"name": "wing", "prompt": "a panel", "size_m": [4.4, 1.4]},
+    ]))
+
+    with pytest.raises(decompose.DecomposeError, match="2 number"):
+        decompose.validate(p)
+
+
+def test_a_mirror_cannot_state_its_own_size():
+    """It takes its source's whole transform, so its own size is ignored."""
+    p = decompose.Plan.from_dict(plan(parts=[
+        {"name": "left_wing", "prompt": "a panel", "size_m": 4.4},
+        {"name": "right_wing", "mode": "mirror", "size_m": 4.4,
+         "placement": {"mirror_of": "left_wing"}},
+    ]))
+
+    with pytest.raises(decompose.DecomposeError, match="silently ignored"):
+        decompose.validate(p)
+
+
+def test_stating_both_a_size_and_a_scale_is_a_contradiction():
+    p = decompose.Plan.from_dict(plan(parts=[
+        {"name": "wing", "prompt": "a panel", "size_m": 4.4,
+         "placement": {"scale": 0.5}},
+    ]))
+
+    with pytest.raises(decompose.DecomposeError, match="thrown away"):
+        decompose.validate(p)
+
+
+def test_a_scale_reference_naming_no_such_part_is_rejected():
+    p = decompose.Plan.from_dict(plan(scale_reference="fuselarge"))
+
+    with pytest.raises(decompose.DecomposeError, match="fuselarge"):
+        decompose.validate(p)
+
+
+def test_a_scale_reference_with_no_size_of_its_own_is_rejected():
+    """It is the part every other size is divided by; it needs a size."""
+    p = decompose.Plan.from_dict(plan(scale_reference="body"))
+
+    with pytest.raises(decompose.DecomposeError, match="nothing to be the unit"):
+        decompose.validate(p)
+
+
+def test_a_generated_part_with_no_size_is_warned_about():
+    """Not an error — half a plan still builds — but silence here is what made
+    every new object need a hand-written scale script."""
+    p = decompose.Plan.from_dict(plan())
+
+    assert "unit box" in decompose.validate(p)[0]
+
+
+def test_a_scripted_part_with_no_size_is_not_warned_about():
+    """A primitive is already built at the size its params state."""
+    p = decompose.Plan.from_dict(plan(parts=[
+        {"name": "bed", "mode": "script", "kind": "crate"},
+        {"name": "cloth", "prompt": "a rolled bundle", "size_m": 1.1},
     ]))
 
     assert decompose.validate(p) == []
@@ -582,6 +782,44 @@ def test_the_aircraft_example_scripts_its_landing_gear():
 
     assert plan.part("left_gear_strut").mode == decompose.SCRIPT
     assert plan.part("left_gear_wheel").kind == "wheel"
+
+
+@pytest.mark.parametrize("name", sorted(decompose.EXAMPLES))
+def test_every_generated_part_in_the_examples_declares_its_real_size(name):
+    """An example that does not is an example that teaches the parts-bin
+    failure — every generated part comes back the same size as every other."""
+    generated = [
+        p for p in decompose.example(name).parts if p.mode == decompose.GENERATE
+    ]
+
+    assert generated and all(p.size_m is not None for p in generated)
+
+
+def test_the_aircraft_examples_scales_are_the_ones_measured_on_the_real_build():
+    """These eight numbers were supplied by hand to assemble the Bonanza that
+    worked. Reproducing them from `size_m` is the whole point of the field: the
+    hand step is what stood between "works for aircraft" and "works for
+    anything"."""
+    scales = decompose.scales(decompose.BONANZA)
+
+    assert {k: round(v, 4) for k, v in scales.items()} == {
+        "fuselage": 1.0, "left_wing": 0.5238, "tail_fin": 0.1786,
+        "left_tailplane": 0.2024, "engine_cowl": 0.1667, "propeller": 0.2381,
+        "left_gear_strut": 0.1071, "left_gear_wheel": 0.0655,
+    }
+
+
+def test_the_cart_example_needs_no_scaling_because_it_is_drawn_in_metres():
+    """It has no scale_reference, so a unit is a metre — which is what
+    primitives.py already builds in. Declaring the sizes must not move it."""
+    scales = decompose.scales(decompose.WOODEN_CART)
+
+    scripted = {
+        p.name for p in decompose.example("wooden_cart").parts
+        if p.mode == decompose.SCRIPT
+    }
+    assert all(scales[name] == 1.0 for name in scripted)
+    assert scales["lantern"] == 0.35  # 35 cm, against a 3.2 m cart bed
 
 
 def test_an_unknown_example_lists_the_real_ones():

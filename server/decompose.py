@@ -38,12 +38,22 @@ the text encoder and brought the whole aeroplane back — a propeller prompt
 rendered a propeller *attached to a plane*. `validate()` warns about this,
 because it is invisible until you look at the images.
 
+**Every part also has to say how big it really is.** Measured on the six
+generated Bonanza parts, the longest side of every returned mesh is 0.992-1.000:
+the generator normalises its output to a unit box, so a landing-gear strut comes
+back exactly as large as a fuselage and no amount of anchoring recovers the
+difference. Nothing downstream can know — the mesh does not, the reference image
+does not — so `Part.size_m` states it and `part_scale()` turns it into the
+`scale` assemble.py already accepts. Without it every new object repeats the
+Bonanza's hand-tuned scale script.
+
 The plan is data. A coding agent driving this over MCP already has the reasoning
 to decide that a cart has two wheels and an axle, so there is deliberately **no
 LLM call in here** — the agent authors the plan and this executes it. See
 EXAMPLES for two worked ones.
 """
 import logging
+import math
 import re
 import time
 import uuid
@@ -87,6 +97,13 @@ THIN_PART_VIEW = (
     "depth are clearly visible, large in frame"
 )
 
+# Sanity bounds on a declared real-world size, in metres. Wide on purpose — a
+# rivet and an airliner are both legitimate — but they catch the mistake that
+# actually happens, which is an LLM writing millimetres or centimetres into a
+# field named `_m` and a propeller arriving 2 000 units across.
+MIN_SIZE_M = 0.001
+MAX_SIZE_M = 1000.0
+
 # Words that carry no subject identity, so they cannot be evidence of the style
 # suffix leaking the whole object back into a part prompt.
 _STOPWORDS = frozenset(
@@ -119,6 +136,14 @@ class Part:
     kind: str | None = None
     params: dict = field(default_factory=dict)
     # MIRROR: nothing to build; placement.mirror_of names the source part.
+    #
+    # How big this part is in the real world, in metres. Either the longest
+    # dimension as one number — `2.0` for a propeller, which is all a simple
+    # part needs — or `[x, y, z]` extents in the part's own frame, which says
+    # the same thing and additionally tells orient.py which way round it goes.
+    # This is the only place the information can come from; see the module
+    # docstring. A mirror inherits its source's, and must not state its own.
+    size_m: float | list[float] | None = None
     material: str | None = None
     color: str | None = None
     target_faces: int | None = None
@@ -160,6 +185,12 @@ class Plan:
     parts: list[Part] = field(default_factory=list)
     seed: int = 20260806
     name: str | None = None
+    # The part that is 1.0 unit across in the assembled scene — "the fuselage is
+    # the unit". Every `size_m` is then divided by that part's, so the numbers a
+    # caller reads back are ratios it can check by eye (a wing is half a
+    # fuselage) instead of absolute metres it has to trust. Left unset, one unit
+    # is one metre, which is what a plan built from primitives already assumes.
+    scale_reference: str | None = None
     # Plan-wide defaults; a part overrides either.
     generator: str = DEFAULT_GENERATOR
     target_faces: int = DEFAULT_TARGET_FACES
@@ -236,6 +267,179 @@ def style_leaks(plan: Plan) -> list[str]:
     return sorted(_content_words(plan.subject) & _content_words(plan.style))
 
 
+# --- real-world size --------------------------------------------------------
+#
+# The generator hands back a unit box. Measured on the six generated Bonanza
+# parts, longest side: fuselage 0.9923, wing 0.9989, fin 0.9997, tailplane
+# 0.9936, cowl 0.9989, propeller 0.9921. A 0.9 m strut and an 8.4 m fuselage
+# arrive the same size, and an anchor cannot fix it because an anchor measures
+# whatever box it is given. So the plan states the real size and the scale is
+# arithmetic from there.
+
+
+def part_extents(part: Part) -> list[float] | None:
+    """`size_m` as [x, y, z], or None if it was given as a single number.
+
+    This is exactly what orient.py wants for `orient.extents` — real metres in
+    the part's own frame, of which it uses only the ratios.
+    """
+    values = _size_values(part)
+    return values if len(values) == 3 else None
+
+
+def part_length(part: Part) -> float | None:
+    """The part's longest real dimension, in metres. None if it declared none."""
+    values = _size_values(part)
+    return max(values) if values else None
+
+
+def _size_values(part: Part) -> list[float]:
+    """Validate `size_m` into a list of one or three positive metre lengths.
+
+    Cheap, so `validate()` can run it on every part before anything is spent.
+    """
+    value = part.size_m
+    if value is None:
+        return []
+    # bool is an int in Python, and `"size_m": true` is a typo, not one metre.
+    if isinstance(value, bool):
+        raise DecomposeError(
+            f"part {part.name!r} has size_m {value!r}; expected its longest "
+            f"dimension in metres, or [x, y, z] extents in metres"
+        )
+    if isinstance(value, (int, float)):
+        values = [float(value)]
+    elif isinstance(value, (list, tuple)):
+        if len(value) != 3:
+            raise DecomposeError(
+                f"part {part.name!r} has size_m with {len(value)} number(s); "
+                f"expected one — its longest dimension in metres — or three, "
+                f"[x, y, z] extents in metres"
+            )
+        try:
+            values = [float(v) for v in value]
+        except (TypeError, ValueError) as exc:
+            raise DecomposeError(
+                f"part {part.name!r} has size_m {list(value)!r}; every extent "
+                f"must be a number of metres"
+            ) from exc
+    else:
+        raise DecomposeError(
+            f"part {part.name!r} has size_m {value!r}; expected a number of "
+            f"metres or [x, y, z] extents in metres"
+        )
+
+    for v in values:
+        if not math.isfinite(v) or v <= 0:
+            raise DecomposeError(
+                f"part {part.name!r} has size_m {value!r}; every extent must be "
+                f"a positive, finite number of metres"
+            )
+        if not MIN_SIZE_M <= v <= MAX_SIZE_M:
+            raise DecomposeError(
+                f"part {part.name!r} has size_m {value!r}, which is {v}m — "
+                f"outside {MIN_SIZE_M}m to {MAX_SIZE_M}m. size_m is **metres**, "
+                f"not millimetres or studs: a 55 cm wheel is 0.55, not 550"
+            )
+    return values
+
+
+def unit_metres(plan: Plan) -> float:
+    """How many real metres one assembled unit is worth.
+
+    `scale_reference` names the part that is 1.0 unit; without one, a unit is a
+    metre, which is the convention a plan made of primitives is already written
+    in — primitives.py builds a 3.2 m cart bed 3.2 units wide.
+    """
+    if not plan.scale_reference:
+        return 1.0
+    reference = plan.part(plan.scale_reference)
+    if reference is None:
+        raise DecomposeError(
+            f"scale_reference names unknown part {plan.scale_reference!r}; "
+            f"known parts are {sorted(p.name for p in plan.parts)}"
+        )
+    length = part_length(reference)
+    if length is None:
+        raise DecomposeError(
+            f"scale_reference names {plan.scale_reference!r} as the 1.0 unit, "
+            f"but that part declares no size_m, so there is nothing to be the "
+            f"unit *of* — give it one, or drop scale_reference and state every "
+            f"size in metres"
+        )
+    return length
+
+
+def _natural_span(part: Part) -> float:
+    """How many units of its own mesh this part already spans.
+
+    1.0 for anything the generator produced — that is the measured fact this
+    whole field exists for. A scripted part is built at whatever its params say,
+    so it is measured instead, which means a primitive may be drawn at any
+    convenient size and `size_m` still lands it correctly: the Bonanza's gear is
+    drawn at unit span like a generated part, the cart's is drawn in metres, and
+    both come out the size they claim.
+    """
+    if part.mode != SCRIPT or not part.kind:
+        return 1.0
+    try:
+        mesh = primitives.build(part.kind, part.params)
+    except Exception:  # validate() reports this properly; do not mask it here
+        return 1.0
+    lo, hi = mesh.bounds
+    span = float(max(hi - lo))
+    return span or 1.0
+
+
+def part_scale(plan: Plan, part: Part) -> float | None:
+    """The uniform `scale` this part needs, or None if it declared no size.
+
+    Uniform, not per-axis: the mesh already has the right proportions, and a
+    non-uniform scale would stretch a part that is merely the wrong size. A
+    mirror gets None because it inherits its source's whole transform — scaling
+    it again would square the source's scale.
+    """
+    if part.mode == MIRROR:
+        return None
+    length = part_length(part)
+    if length is None:
+        return None
+    return round(length / unit_metres(plan) / _natural_span(part), 6)
+
+
+def scales(plan: Plan) -> dict[str, float]:
+    """Every part's computed scale, by name. Parts without a size are absent."""
+    plan = Plan.from_dict(plan)
+    out = {}
+    for part in plan.parts:
+        scale = part_scale(plan, part)
+        if scale is not None:
+            out[part.name] = scale
+    return out
+
+
+def placement_of(plan: Plan, part: Part) -> dict:
+    """The part's placement, with anything it defers to the plan filled in.
+
+    Only one thing defers today: `"orient": true` means "orient me to the
+    extents I already declared", which saves writing the same three numbers
+    twice. orient.py takes a bare [x, y, z] of target extents, so this is a
+    substitution rather than a translation.
+    """
+    placement = dict(part.placement)
+    if placement.get("orient") is True:
+        extents = part_extents(part)
+        if extents is None:
+            raise DecomposeError(
+                f"part {part.name!r} asks to be oriented to its own size_m, but "
+                f"size_m is a single length; orienting needs [x, y, z] extents "
+                f"because it is the ratios between them that say which way the "
+                f"part lies"
+            )
+        placement["orient"] = extents
+    return placement
+
+
 # --- validation -------------------------------------------------------------
 
 
@@ -273,6 +477,25 @@ def validate(plan: Plan) -> list[str]:
                 f"part {part.name!r} names generator {generator!r}; expected one of "
                 f"{sorted(jobs.GENERATORS)}"
             )
+
+        # Every size is parsed here, where it costs a microsecond, rather than
+        # at assembly — a plan whose propeller is 2 000 units across has already
+        # spent eight minutes of GPU time by then.
+        _size_values(part)
+        if part.size_m is not None and part.mode == MIRROR:
+            raise DecomposeError(
+                f"part {part.name!r} is {MIRROR!r} and also states size_m; a "
+                f"mirror takes its whole transform from "
+                f"{part.placement.get('mirror_of')!r}, including that part's "
+                f"scale, so its own size would be silently ignored"
+            )
+        if part.size_m is not None and part.placement.get("scale") is not None:
+            raise DecomposeError(
+                f"part {part.name!r} states both size_m and placement.scale; "
+                f"size_m *is* how the scale is computed, so one of the two would "
+                f"be thrown away — keep size_m"
+            )
+        placement_of(plan, part)  # expands `orient: true`, or says why it cannot
 
         if part.mode == GENERATE:
             if not str(part.prompt or "").strip():
@@ -332,6 +555,26 @@ def validate(plan: Plan) -> list[str]:
         )
     if not any(p.mode == GENERATE for p in plan.parts):
         warnings.append("no generated parts; this plan needs no image provider and no GPU")
+
+    # Raises if scale_reference names nothing, or names a part with no size to
+    # be the unit of. Cheap, and the alternative is a whole build at unit scale.
+    unit_metres(plan)
+
+    sizeless = [
+        p.name for p in plan.parts if p.mode == GENERATE and p.size_m is None
+    ]
+    if sizeless:
+        # A warning, not an error: a caller may be scaling by hand downstream,
+        # and half a plan is still worth building. But it is the difference
+        # between a model and a parts bin, so it does not stay silent.
+        warnings.append(
+            f"part(s) {sizeless} declare no `size_m`. The generator normalises "
+            f"every mesh to a unit box — measured, the longest side comes back "
+            f"0.99-1.00 whatever the subject — so these will assemble the same "
+            f"size as each other and as everything else. Give each its real "
+            f"size in metres: one number for the longest dimension, or "
+            f"[x, y, z] extents."
+        )
 
     return warnings
 
@@ -453,7 +696,12 @@ def run(plan, backend=None, progress=None) -> dict:
             "prompt": None,
             "status": "pending",
             "error": None,
-            "placement": dict(part.placement),
+            "placement": placement_of(plan, part),
+            # The real size the plan declared, and the scale that turns this
+            # part's unit box into it. Computed once here so the caller never
+            # has to write the throwaway scale script again.
+            "size_m": part.size_m,
+            "scale": part_scale(plan, part),
             # Carried through to assembly rather than re-guessed from the node
             # name: the plan already stated what this part is made of, and
             # materials.KEYWORDS reading "barrel" as a gun is the failure that
@@ -530,6 +778,11 @@ def run(plan, backend=None, progress=None) -> dict:
                 "name": r["name"],
                 **({"material": r["material"]} if r["material"] else {}),
                 **({"color": r["color"]} if r["color"] else {}),
+                # Before the placement, so a plan that stated `scale` there
+                # outright still wins — validate() has already rejected stating
+                # both. A mirrored part has no scale of its own: it inherits the
+                # source's transform, and scaling it again would square it.
+                **({"scale": r["scale"]} if r["scale"] is not None else {}),
                 **r["placement"],
             }
             for r in built
@@ -602,6 +855,11 @@ BONANZA: dict = {
         "the upper left, photorealistic"
     ),
     "seed": 20260806,
+    # Every size_m below is a measurement off a real G36, and the fuselage is
+    # the unit — so the scales this produces read as ratios anyone can check
+    # without a tape measure: a wing is a bit over half a fuselage (0.5238), a
+    # wheel is a fifteenth of one (0.0655).
+    "scale_reference": "fuselage",
     "parts": [
         {
             "name": "fuselage",
@@ -614,6 +872,11 @@ BONANZA: dict = {
                 "glass canopy near one end, no wings, no fins, no wheels"
             ),
             "target_faces": 16000,
+            # 8.4 m nose to tail, and the part every other size is stated
+            # against. The full triple rather than the bare 8.4 because a
+            # fuselage is 6:1 slender and that ratio is what tells orient.py
+            # which of the mesh's three axes is the long one.
+            "size_m": [1.1, 1.3, 8.4],
             "material": "paint",
             "placement": {"position": [0, 0, 0]},
             "note": "the hero part; everything else anchors to it",
@@ -631,6 +894,8 @@ BONANZA: dict = {
                 "a small orange light at the narrow tip, cut off flat at the wide "
                 "end, one panel only, " + THIN_PART_VIEW
             ),
+            # 4.4 m semi-span, 1.4 m root chord, 0.25 m thick.
+            "size_m": [4.4, 0.25, 1.4],
             "material": "paint",
             "placement": {
                 "anchor": {"to": "fuselage", "align": {"x": "min", "y": 0.25, "z": 0.45},
@@ -649,6 +914,7 @@ BONANZA: dict = {
                 "a single vertical tail fin with a rudder, cut off flat at the "
                 "base, nothing attached"
             ),
+            "size_m": [0.18, 1.5, 1.4],
             "material": "paint",
             "placement": {
                 "anchor": {"to": "fuselage", "align": {"z": "min", "y": "top"},
@@ -662,6 +928,7 @@ BONANZA: dict = {
                 "flap, cut off flat at one end, nothing attached to it"
             ),
             "target_faces": 8000,
+            "size_m": [1.7, 0.12, 0.9],
             "material": "paint",
             "placement": {
                 "anchor": {"to": "fuselage", "align": {"x": "min", "y": 0.4, "z": 0.05},
@@ -679,6 +946,7 @@ BONANZA: dict = {
                 "a hollow engine cowling shell, open at both ends, with a round "
                 "air intake"
             ),
+            "size_m": [1.1, 1.1, 1.4],
             "material": "paint",
             "placement": {
                 "anchor": {"to": "fuselage", "align": {"z": "max"}, "my": {"z": "min"}},
@@ -687,6 +955,11 @@ BONANZA: dict = {
         {
             "name": "propeller",
             "prompt": "a three-blade propeller with a polished spinner hub",
+            # 2.0 m disc, and the single-number form is the right one here: a
+            # three-blade propeller is round, so there is no long axis to
+            # declare and orient.py's `propeller` role deliberately carries no
+            # extents either — it finds the spin axis instead.
+            "size_m": 2.0,
             "material": "metal",
             "placement": {
                 "anchor": {"to": "engine_cowl", "align": {"z": "max"}, "my": {"z": "min"}},
@@ -698,11 +971,20 @@ BONANZA: dict = {
         # spindle and the wheel did not survive at all, with or without the
         # view clause. Two primitives are exact, free, and correct — which is
         # the routing rule in docs/PROCEDURAL.md landing on an aircraft.
+        #
+        # Both are drawn at unit span — a 1.0-long cylinder, a 1.0-wide wheel —
+        # exactly like a generated part, and `size_m` says what they really
+        # measure. That is a free choice, not a requirement: `_natural_span`
+        # measures the primitive, so the wooden cart's are drawn in metres
+        # instead and land just as correctly. What must not happen is stating a
+        # size that disagrees with the drawing, which is how the wheel used to
+        # arrive at 0.29 m.
         {
             "name": "left_gear_strut",
             "mode": SCRIPT,
             "kind": "cylinder",
             "params": {"radius": 0.055, "height": 1.0, "chamfer": 0.02},
+            "size_m": [0.11, 0.9, 0.11],
             "material": "metal",
             "placement": {
                 "anchor": {"to": "left_wing", "align": {"y": "under", "x": 0.7, "z": 0.5}},
@@ -712,8 +994,12 @@ BONANZA: dict = {
             "name": "left_gear_wheel",
             "mode": SCRIPT,
             "kind": "wheel",
-            "params": {"radius": 0.26, "width": 0.11, "hub_radius": 0.08,
-                       "spoke_count": 6},
+            "params": {"radius": 0.5, "width": 0.21, "hub_radius": 0.15,
+                       "rim_width": 0.42, "spoke_count": 6, "chamfer": 0.04},
+            # In the frame the primitive is drawn in — a 0.55 m disc in x/z,
+            # 0.12 m wide along y — not the frame the `rotation` below puts it
+            # in. size_m describes the part, placement moves it.
+            "size_m": [0.55, 0.12, 0.55],
             "material": "rubber",
             # _revolve sweeps around +Y, so a wheel is built lying flat and has
             # to be stood up to roll along Z.
@@ -743,6 +1029,11 @@ WOODEN_CART: dict = {
         "brown leather straps, soft overcast daylight, photorealistic, matte finish"
     ),
     "seed": 4711,
+    # No scale_reference, so one unit is one metre — which is what this plan was
+    # already written in, because primitives.py builds a 3.2 m bed 3.2 units
+    # wide. Every scripted part below therefore computes a scale of exactly 1.0
+    # and nothing moves; the two *generated* parts are the ones that needed the
+    # field, and they are the reason it exists at all.
     "parts": [
         # Everything with a measurement is scripted. A generated crate cost
         # 83-151s and 20 000 faces and still had rounded corners; the scripted
@@ -753,6 +1044,10 @@ WOODEN_CART: dict = {
             "kind": "crate",
             "params": {"width": 3.2, "height": 0.7, "depth": 1.8,
                        "style": "planks", "plank_count": 5},
+            # The same three numbers the params already state, which is exactly
+            # the point: a scripted part is drawn at its real size, so declaring
+            # it changes nothing and the plan still reads as dimensioned.
+            "size_m": [3.2, 0.7, 1.8],
             "placement": {"anchor": {"to": "ground"}, "position": [0, 0, 0]},
         },
         {
@@ -760,6 +1055,7 @@ WOODEN_CART: dict = {
             "mode": SCRIPT,
             "kind": "cylinder",
             "params": {"radius": 0.09, "height": 2.1},
+            "size_m": [0.18, 2.1, 0.18],
             "material": "dark_metal",
             "placement": {
                 "rotation": [0, 0, 90],
@@ -771,6 +1067,7 @@ WOODEN_CART: dict = {
             "mode": SCRIPT,
             "kind": "wheel",
             "params": {"radius": 0.85, "width": 0.22, "spoke_count": 8},
+            "size_m": [1.7, 0.22, 1.7],
             "material": "wood",
             "placement": {
                 "rotation": [0, 0, 90],
@@ -787,6 +1084,7 @@ WOODEN_CART: dict = {
             "mode": SCRIPT,
             "kind": "plank",
             "params": {"length": 2.4, "width": 0.14, "thickness": 0.1},
+            "size_m": [2.4, 0.1, 0.14],
             "placement": {
                 "anchor": {"to": "cart_bed", "align": {"x": 0.15, "y": 0.6, "z": "max"},
                            "my": {"z": "min"}},
@@ -804,6 +1102,10 @@ WOODEN_CART: dict = {
                 "a rolled bundle of coarse canvas cloth tied with three loops of "
                 "rope, soft folds and creases"
             ),
+            # A metre-long roll. Without this it would arrive as big as the
+            # cart — the generator returns a unit box whatever it drew, and a
+            # bundle of cloth has no dimensions of its own to fall back on.
+            "size_m": [1.1, 0.45, 0.45],
             "material": "fabric",
             "target_faces": 8000,
             "placement": {"anchor": {"to": "cart_bed", "align": {"y": "on", "x": 0.3}}},
@@ -814,6 +1116,7 @@ WOODEN_CART: dict = {
                 "a small hand lantern with a punched metal top, four glass panes "
                 "and a looped carrying handle"
             ),
+            "size_m": [0.18, 0.35, 0.18],
             "material": "metal",
             "target_faces": 6000,
             "placement": {"anchor": {"to": "cart_bed", "align": {"y": "on", "x": 0.8}}},

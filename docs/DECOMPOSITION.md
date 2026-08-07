@@ -34,12 +34,14 @@ and `decompose.run()` executes it.
   "generator": "trellis2",
   "target_faces": 12000,
   "textured": false,
+  "scale_reference": "fuselage",
   "parts": [
     {
       "name": "fuselage",
       "mode": "generate",
       "prompt": "a hollow elongated shell with an oval cross section, tapered at both ends, six oval portholes in a row along the side, ...",
       "target_faces": 16000,
+      "size_m": [1.1, 1.3, 8.4],
       "material": "paint",
       "placement": {"position": [0, 0, 0]}
     },
@@ -48,6 +50,7 @@ and `decompose.run()` executes it.
       "mode": "script",
       "kind": "wheel",
       "params": {"radius": 0.85, "width": 0.22, "spoke_count": 8},
+      "size_m": [1.7, 0.22, 1.7],
       "placement": {"anchor": {"to": "axle", "align": {"x": "min"}, "my": {"x": "max"}}}
     },
     {
@@ -82,6 +85,115 @@ airframe with scripted landing gear) and `wooden_cart` (scripted hardware with
 only the soft irregular cargo generated). They are the two halves of the routing
 rule in [PROCEDURAL.md](PROCEDURAL.md), and they are also the test fixtures — an
 example that stops validating fails the suite.
+
+## `size_m`: how big the part really is
+
+**The generator destroys scale, and this field is the only place the information
+can come from.** Measured on the six generated Bonanza parts, the longest side of
+every returned mesh:
+
+| fuselage | wing | tail fin | tailplane | cowl | propeller |
+| --- | --- | --- | --- | --- | --- |
+| 0.9923 | 0.9989 | 0.9997 | 0.9936 | 0.9989 | 0.9921 |
+
+Every image-to-3D model here normalises its output to a **unit box**. An 8.4 m
+fuselage and a 0.9 m landing-gear strut come back exactly the same size, and
+nothing downstream can recover the difference: the mesh does not know, the
+reference image does not know (it is a 1024² frame with the subject filling it
+either way), and an anchor cannot rescue it because an anchor measures whatever
+box it is handed. The information only exists in the head of whoever decided the
+subject was a Bonanza — which is the plan's author.
+
+This is not hypothetical. The twelve-part Bonanza that assembled correctly did so
+with a **throwaway script supplying every scale by hand**. That step is the
+difference between "works for aircraft" and "works for anything", because every
+new object hits the same wall.
+
+So each part states its real size, in metres:
+
+```jsonc
+"size_m": 2.0                  // the longest dimension. Enough for a propeller
+"size_m": [4.4, 0.25, 1.4]     // [x, y, z] extents, in the part's own frame
+```
+
+Both forms are accepted because both are easy to author correctly, which matters
+when the author is an LLM. The single number is the one to reach for when the
+part is round or blocky and has no obvious long axis; the triple says the same
+thing about scale *and* additionally states the part's proportions, which is
+what [orientation](ORIENTATION.md) needs (see below).
+
+`scale_reference` names the part that is **1.0 unit** in the assembled scene —
+`"fuselage"` on the Bonanza. Sizes then divide through it, so the numbers that
+come back are ratios a human can check by eye: a wing is a bit over half a
+fuselage, a wheel a fifteenth of one. Without a `scale_reference`, one unit is
+one metre, which is what a plan built from primitives is already written in —
+`primitives.py` builds a 3.2 m cart bed 3.2 units wide.
+
+`run()` computes the scale and puts it in the `assemble_request`, so the caller
+never writes that script again:
+
+| part | `size_m` | scale |
+| --- | --- | --- |
+| `fuselage` | 8.4 m | **1.0** |
+| `left_wing` | 4.4 m | 0.5238 |
+| `propeller` | 2.0 m | 0.2381 |
+| `tail_fin` | 1.5 m | 0.1786 |
+| `left_tailplane` | 1.7 m | 0.2024 |
+| `engine_cowl` | 1.4 m | 0.1667 |
+| `left_gear_strut` | 0.9 m | 0.1071 |
+| `left_gear_wheel` | 0.55 m | 0.0655 |
+
+Those are the same eight numbers the hand-written script supplied. Applied to the
+meshes still on the reference box, every part lands within 0.7% of the size it
+declares.
+
+The scale is **uniform**, never per-axis: the mesh already has the right
+proportions and a non-uniform scale would stretch a part that is merely the wrong
+size. A **mirrored part gets no scale at all** — it inherits its source's whole
+transform, and scaling it again would square the source's scale.
+
+### Scripted parts are measured, not assumed
+
+A primitive is built at whatever its params say, so its span is known rather than
+1.0, and the scale is `size_m ÷ unit ÷ that span`. The practical effect is that
+**a primitive may be drawn at any convenient size**: the Bonanza's gear is drawn
+at unit span like a generated part, the cart's axle is drawn 2.1 m long, and both
+land at the size they claim. A scripted part that omits `size_m` is left exactly
+as its params built it.
+
+### It is also the input orientation wants
+
+`orient` matches a part's oriented bounding box against declared target extents,
+of which it uses only the ratios — so an `[x, y, z]` `size_m` is already the
+right thing, in the right frame, in the right units. Rather than write the three
+numbers twice, a part may defer:
+
+```jsonc
+{ "name": "left_wing", "size_m": [4.4, 0.25, 1.4], "placement": {"orient": true} }
+```
+
+which expands to `"orient": [4.4, 0.25, 1.4]` in the `assemble_request`. It needs
+the triple; deferring with a single length is an error, because one number cannot
+say which way a part lies.
+
+### What validation catches
+
+All of it before a single image is generated, because a plan that takes eight
+minutes to fail is much worse than one that fails in a millisecond:
+
+- a size that is not one or three positive finite numbers,
+- a size outside 0.001 m – 1000 m, which is the mistake that actually happens:
+  millimetres or centimetres in a field named `_m`. `"size_m": 550` for a 55 cm
+  wheel is named as such;
+- `size_m` on a mirror, or beside an explicit `placement.scale` — in both cases
+  one of the two would be silently ignored;
+- a `scale_reference` naming an unknown part, or one with no size of its own;
+- `"orient": true` on a part whose size is a single length.
+
+A generated part with **no** `size_m` is a warning rather than an error — half a
+plan is still worth building, and a caller may be scaling downstream — but it
+does not stay silent, because silence here is what made every object need a
+hand-written scale script.
 
 ## Style coherence
 
@@ -268,11 +380,13 @@ whether it should have been generated at all.** The Bonanza plan is now 12 parts
   from part names by `materials.py`. The coherence work is not wasted: a
   coherent reference set produces parts at consistent *proportions* and
   detailing. But do not expect the livery in the glTF.
-- **Scale between parts is not established.** Each reference is a 1024² frame
-  with the object filling it, so a propeller and a fuselage arrive the same
-  size. `assemble.py`'s anchors work from measured bounds and a per-part
-  `scale`, which is the right place to fix it, but the plan cannot state a real
-  size for a generated part because nothing knows one yet.
+- **Scale has to be declared, and a wrong declaration is invisible.** Each
+  reference is a 1024² frame with the object filling it, so a propeller and a
+  fuselage arrive the same size and `size_m` is the only thing that separates
+  them (above). Nothing can check it: a plan that says a Bonanza's wing is 44 m
+  validates, generates, assembles, and produces an aeroplane with a wing ten
+  times too long. The numbers are the author's responsibility; only the
+  obviously-impossible ones are caught.
 - **Nothing here is deterministic end to end.** Same seed, near-identical image
   (4.6/255); the mesh stage adds its own variation on top.
 - **No LLM, by design** — which means a bad plan produces bad parts efficiently.
