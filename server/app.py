@@ -23,6 +23,7 @@ import export
 import imagegen
 import jobs
 import materials
+import orient as orienting
 import pipeline
 import primitives
 import trellis
@@ -376,9 +377,72 @@ class Anchor(BaseModel):
     )
 
 
+class Orient(BaseModel):
+    """Turn the part into the frame it is declared to belong in.
+
+    A generator reconstructs an object in its reference image's camera frame,
+    so parts arrive at arbitrary azimuth and an assembly of correctly-*placed*
+    parts still looks like debris. Say what the part is and the server works
+    out the rotation from its own geometry. See server/orient.py.
+    """
+
+    role: str | None = Field(
+        None,
+        description=(
+            "A named shape, which supplies extents and taper together. "
+            f"One of {orienting.roles()}. Left/right parts describe the LEFT "
+            "one; the right one is `mirror_of` and inherits this."
+        ),
+    )
+    extents: list[float] | None = Field(
+        None,
+        description=(
+            "[x, y, z] the part should measure in the assembled scene — real "
+            "metres are ideal but only the ratios are used. Overrides `role`. "
+            "Declare two axes as equal where you are not sure which is bigger; "
+            "an honest tie costs nothing and a wrong claim costs an axis."
+        ),
+    )
+    taper: dict[str, str] | None = Field(
+        None,
+        description=(
+            "Per axis, '+' or '-': the direction the part gets THINNER in. "
+            "This is what resolves nose-forward from nose-backward, which no "
+            "bounding box can. A wing tapering to a tip at -x is {'x': '-'}."
+        ),
+    )
+    spin: str | None = Field(
+        None,
+        description=(
+            "'x', 'y' or 'z': the axis the part is rotationally symmetric "
+            "about, for wheels, cowls and propellers whose extents say nothing "
+            "useful. Detected in the mesh, not assumed."
+        ),
+    )
+    min_confidence: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Leave the part as generated if orientation is less certain than "
+            "this. The result is reported either way, so a caller can see the "
+            "number it declined."
+        ),
+    )
+
+
 class PartPlacement(BaseModel):
     job_id: str = Field(..., description="A completed image_to_3d or primitive job")
     name: str = Field(..., description="glTF node name for this part")
+    orient: Orient | str | list[float] | None = Field(
+        None,
+        description=(
+            "Rotate this part into the declared frame before anything else "
+            "happens — including anchors, which then measure the part as it "
+            "will appear. A bare string is a role name and a bare [x, y, z] is "
+            "target extents."
+        ),
+    )
     position: list[float] | None = Field(
         None,
         description=(
@@ -454,6 +518,19 @@ def _part_mesh_path(p: PartPlacement) -> Path:
     return mesh_path
 
 
+def _orient_spec(spec):
+    """A validated Orient back to the plain dict assemble.py takes.
+
+    exclude_none: a missing `extents` means "whatever the role says", which is
+    not the same request as an explicit null — and orient.py rejects keys it
+    does not recognise, so a typo is an error rather than a silently ignored
+    declaration.
+    """
+    if not isinstance(spec, Orient):
+        return spec
+    return spec.model_dump(exclude_none=True)
+
+
 def _recorded_material(job_id: str) -> str | None:
     job = jobs.get(job_id)
     result = (job or {}).get("result") or {}
@@ -470,6 +547,7 @@ def assemble_scene(req: AssembleRequest):
         {
             "name": p.name,
             "mesh_path": str(_part_mesh_path(p)),
+            "orient": _orient_spec(p.orient),
             "position": p.position,
             "rotation": p.rotation,
             "scale": p.scale,
@@ -561,6 +639,12 @@ def decomposition_examples():
 def list_materials():
     """The material families a part name can resolve to."""
     return {"families": materials.families(), "default": materials.DEFAULT_MATERIAL}
+
+
+@api.get("/orient/roles")
+def list_orient_roles():
+    """Named shapes a part can be oriented into, with what each one declares."""
+    return {"roles": orienting.ROLES}
 
 
 @api.get("/scenes/{scene_id}/mesh")

@@ -133,6 +133,35 @@ It takes the whole transform from the named part, so it cannot also set
 `{"axis": "z", "about": 0}`) and may also be used on its own to flip a part's
 own placement. Face winding is corrected, so a mirrored part is not inside-out.
 
+### `orient`
+
+Placement fixes where a part *is*. It cannot fix which way the part faces, and
+that is a separate structural problem: an image-to-3D generator reconstructs an
+object in its reference image's camera frame, so parts arrive at arbitrary
+azimuth and a set of correctly-placed parts still reads as debris. An anchor
+cannot rescue it, because an anchor measures a **box** and a box cannot tell
+that the thing inside it is lying down.
+
+So a part may also declare what it *is*, and the server derives the rotation
+from the mesh's own geometry:
+
+```jsonc
+{ "job_id": "...", "name": "left_wing", "orient": "wing",
+  "anchor": { "to": "fuselage", "align": { "x": 0.12, "y": 0.28, "z": 0.45 } } }
+```
+
+![orientation before and after](images/orientation-bonanza.png)
+
+`orient` takes a role name, a bare `[x, y, z]` of target extents, or an object
+with `role` / `extents` / `taper` / `spin` / `min_confidence`. It is resolved
+**before** anchors, so an anchor measures the part as it will appear, and every
+part reports the `confidence` it was oriented with so a caller can leave a
+doubtful part alone rather than turn it wrongly. `mirror_of` inherits the
+orientation with the rest of the transform.
+
+The full method, the roles, and what the confidence means:
+[ORIENTATION.md](ORIENTATION.md).
+
 ### Order does not matter
 
 Anchors form a graph, resolved by topological sort. A wheel may be listed before
@@ -155,6 +184,7 @@ Every part in the `/assemble` response now reports its **final world bounds**:
 
 ```jsonc
 { "name": "left_wheel", "anchored_to": "left_gear_strut", "mirrored_from": null,
+  "orient": { "applied": true, "confidence": 0.99, "degrees": 90.1 },
   "position": [-0.0709, 0.0319, 0.1911],
   "bounds_min": [-0.1028, 0.0, 0.1805], "bounds_max": [-0.039, 0.0639, 0.2017],
   "size": [0.0638, 0.0639, 0.0212], "center": [-0.0709, 0.032, 0.1911] }
@@ -186,13 +216,20 @@ and conclude the assembly is broken; it isn't.
 
 ## Transform order
 
-Scale, then rotate (XYZ euler degrees), then translate. The usual order, but
-worth stating because getting it backwards is a silent failure — the model
-looks wrong rather than erroring.
+Orient, then scale, then rotate (XYZ euler degrees), then translate. The usual
+order with one addition, but worth stating because getting it backwards is a
+silent failure — the model looks wrong rather than erroring.
+
+`orient` comes first so that everything after it is stated in the frame the
+caller was thinking in: a non-uniform `scale` applies to the part's real span
+and chord, and a `rotation` beside an `orient` is a deliberate nudge on a
+canonical part — dihedral, an incidence angle — rather than a competing
+absolute.
 
 An anchor computes the translate, so it sits at the end of that chain: the part
-is scaled and rotated first, and the anchor then measures the result. A `mirror`
-is applied after everything, reflecting the placement that the rest produced.
+is oriented, scaled and rotated first, and the anchor then measures the result.
+A `mirror` is applied after everything, reflecting the placement that the rest
+produced.
 
 ## Detail budget per part
 

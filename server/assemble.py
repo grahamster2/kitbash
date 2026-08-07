@@ -29,6 +29,7 @@ import numpy as np
 import trimesh
 
 import materials
+import orient as orienting
 
 log = logging.getLogger("kitbash.assemble")
 
@@ -63,13 +64,23 @@ ATTACH: dict[str, tuple[float, float]] = {
 GROUND = "ground"
 
 
-def _transform(position, rotation_deg, scale) -> np.ndarray:
-    """Compose scale -> rotate (XYZ euler, degrees) -> translate."""
+def _transform(position, rotation_deg, scale, orient_matrix=None) -> np.ndarray:
+    """Compose orient -> scale -> rotate (XYZ euler, degrees) -> translate.
+
+    Orientation comes first so everything downstream is stated in the frame the
+    caller was thinking in: a part is turned the right way round, and only then
+    is it 4.4 m along x. A `rotation` alongside an `orient` is therefore a
+    deliberate nudge on top of a canonical part — dihedral, an incidence angle —
+    rather than a competing absolute.
+    """
     T = np.eye(4)
+
+    if orient_matrix is not None:
+        T[:3, :3] = np.asarray(orient_matrix, dtype=np.float64)
 
     if scale is not None:
         s = [float(scale)] * 3 if isinstance(scale, (int, float)) else [float(v) for v in scale]
-        T[:3, :3] = np.diag(s)
+        T[:3, :3] = np.diag(s) @ T[:3, :3]
 
     if rotation_deg is not None:
         rx, ry, rz = (math.radians(float(a)) for a in rotation_deg)
@@ -339,6 +350,47 @@ def _placement_deps(part: dict, index: int, by_name, names) -> set[int]:
     return deps
 
 
+def _orientations(parts: list[dict], meshes: list, names: list[str]) -> list[dict | None]:
+    """Resolve every part's `orient` before anything is placed.
+
+    Before, and not during, because an anchor measures a *box*: anchoring a
+    wheel to a strut that is about to be turned upright would measure the strut
+    lying down. Orientation is a fact about the part itself, so it is settled
+    first and everything else is derived from the part as it will appear.
+    """
+    resolved: list[dict | None] = [None] * len(parts)
+    for i, part in enumerate(parts):
+        spec = part.get("orient")
+        if spec is None:
+            continue
+        if part.get("mirror_of"):
+            raise ValueError(
+                f"{names[i]}: mirror_of takes its whole transform from "
+                f"{part['mirror_of']!r}, including that part's orientation, so it "
+                f"cannot also set `orient`"
+            )
+        # The floor may ride inside the declaration or sit beside it, because
+        # the API nests it and a hand-written part list reads better flat.
+        floor = float(part.get("min_confidence") or 0.0)
+        if isinstance(spec, dict) and "min_confidence" in spec:
+            spec = dict(spec)
+            floor = float(spec.pop("min_confidence") or 0.0)
+        try:
+            result = orienting.orient(meshes[i], spec)
+        except ValueError as exc:
+            raise ValueError(f"{names[i]}: {exc}") from exc
+
+        applied = result.confidence >= floor
+        if not applied:
+            # Deliberately not an error. A caller who sets a floor is saying
+            # "leave it alone rather than get it wrong", and the part still has
+            # to be placed — with whatever rotation it already had.
+            log.info("%s: orientation %.2f below floor %.2f, left as generated",
+                     names[i], result.confidence, floor)
+        resolved[i] = {"applied": applied, "result": result}
+    return resolved
+
+
 def _unique_names(parts: list[dict]) -> list[str]:
     """glTF node names must be unique or the parts stop being addressable,
     which defeats the entire purpose of assembling them separately."""
@@ -375,6 +427,7 @@ def resolve_placements(parts: list[dict], meshes: list) -> list[dict]:
     deps = {
         i: _placement_deps(part, i, by_name, names) for i, part in enumerate(parts)
     }
+    orientations = _orientations(parts, meshes, names)
 
     placed: list[dict | None] = [None] * len(parts)
     for i in _resolution_order(deps, names):
@@ -387,9 +440,14 @@ def resolve_placements(parts: list[dict], meshes: list) -> list[dict]:
             anchored_to, mirrored_from = None, source["name"]
         else:
             mirrored_from = None
-            # Scale and rotation first: an anchor is a statement about the part
-            # as it will appear, so its bounds have to be measured after them.
-            T = _transform(None, part.get("rotation"), part.get("scale"))
+            # Orientation, scale and rotation first: an anchor is a statement
+            # about the part as it will appear, so its bounds have to be
+            # measured after them.
+            turn = orientations[i]
+            T = _transform(
+                None, part.get("rotation"), part.get("scale"),
+                turn["result"].matrix if turn and turn["applied"] else None,
+            )
             anchor = part.get("anchor")
             if anchor is None:
                 T[:3, 3] = [float(v) for v in (part.get("position") or [0, 0, 0])]
@@ -417,6 +475,7 @@ def resolve_placements(parts: list[dict], meshes: list) -> list[dict]:
             "bounds_max": hi,
             "anchored_to": anchored_to,
             "mirrored_from": mirrored_from,
+            "orient": orientations[i],
         }
 
     return placed
@@ -426,7 +485,7 @@ def assemble(parts: list[dict], out_path: Path, apply_materials: bool = True) ->
     """Build one glTF from many part meshes.
 
     Each part: {name, mesh_path, position?, rotation?, scale?, anchor?, mirror?,
-    mirror_of?, material?}. Names become glTF node names, which is what makes
+    mirror_of?, orient?, material?}. Names become glTF node names, which is what makes
     the parts addressable downstream — and, when apply_materials is on, what
     picks each part's material. See materials.py for why that is worth doing.
 
@@ -468,6 +527,7 @@ def assemble(parts: list[dict], out_path: Path, apply_materials: bool = True) ->
         )
 
         lo, hi = p["bounds_min"], p["bounds_max"]
+        turn = p["orient"]
         placed.append({
             "name": name,
             "faces": int(len(mesh.faces)),
@@ -478,6 +538,12 @@ def assemble(parts: list[dict], out_path: Path, apply_materials: bool = True) ->
             # anchor that quietly resolved to the origin.
             "anchored_to": p["anchored_to"],
             "mirrored_from": p["mirrored_from"],
+            # What orienting decided, whether or not it was applied — a caller
+            # that set a confidence floor needs to see the number it failed.
+            "orient": (
+                {"applied": turn["applied"], **turn["result"].as_dict()}
+                if turn else None
+            ),
             "position": [round(float(v), 4) for v in p["transform"][:3, 3]],
             "bounds_min": [round(float(v), 4) for v in lo],
             "bounds_max": [round(float(v), 4) for v in hi],

@@ -175,6 +175,7 @@ def test_assemble_records_the_source_mesh_of_each_part(make_mesh, tmp_path):
         "source": str(path),
         "anchored_to": None,
         "mirrored_from": None,
+        "orient": None,
         "position": [0.0, 0.0, 0.0],
         "bounds_min": [-0.5, -0.5, -0.5],
         "bounds_max": [0.5, 0.5, 0.5],
