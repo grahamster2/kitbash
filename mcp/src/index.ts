@@ -354,6 +354,319 @@ server.registerTool(
 );
 
 server.registerTool(
+  "plan_asset",
+  {
+    title: "Decide how to build an asset, and what it will cost",
+    description:
+      "CALL THIS FIRST, before generate_part or decompose_object. It answers " +
+      "the question those tools assume you have already answered: whether " +
+      "this asset should be one generation, a mix of generated and scripted " +
+      "parts, or no generation at all — and what each option costs before any " +
+      "of it runs.\n\n" +
+      "Three strategies, all measured:\n" +
+      "- single — one generation, one part. A skull, a dragon, a boulder, a " +
+      "  statue. Nine of ten organic subjects came back usable this way in " +
+      "  30-49s. Splitting one sculptural whole into parts invents seams that " +
+      "  are not there and costs a generation each. This is a FIRST-CLASS " +
+      "  answer and often the right one.\n" +
+      "- hybrid — generated sculptural parts plus scripted hardware. A plane, " +
+      "  a chest, a detailed building. The showcase chest is 4 generated " +
+      "  meshes and 80 scripted parts.\n" +
+      "- scripted — primitives only, no GPU, milliseconds. Low-poly, " +
+      "  greyboxing, modular kits, anything with a stated dimension.\n\n" +
+      "It also picks the TRIANGLE BUDGET from your stated intent, which is a " +
+      "separate decision and one this project used to get wrong by default: " +
+      "20,000 triangles is Roblox's per-MeshPart import cap, not a universal " +
+      "number. A film render wants no decimation at all; a distant LOD wants " +
+      "1,500; a hero asset held in the hand wants 40,000-200,000. Describe " +
+      "why you need the asset in `intent` and the budget follows.\n\n" +
+      "What comes back: the recommendation with the measured evidence " +
+      "attached, the strategies that lost and why, a per-part routing table, " +
+      "the ceilings the plan is about to hit (things no amount of " +
+      "re-prompting will produce), a full cost estimate, and a DRAFT plan in " +
+      "decompose_object's format that already validates.\n\n" +
+      "The draft is a draft. The server has no world knowledge: it does not " +
+      "know how big your subject really is, what its parts are called, or " +
+      "that this one has a feature the generic version does not. Revise " +
+      "size_m, the prompts, and the part list before you run it. Disagreeing " +
+      "with the recommendation is expected — you know things it cannot.\n\n" +
+      "Costs nothing: pure CPU on the server, milliseconds, no VRAM. There is " +
+      "no reason not to call it.",
+    inputSchema: {
+      subject: z
+        .string()
+        .describe("What to build, e.g. 'an ornate treasure chest'."),
+      intent: z
+        .string()
+        .optional()
+        .describe(
+          "Why you need it, in prose — 'a hero prop the player holds in " +
+            "Unreal', 'distant scenery on mobile', 'a film render in " +
+            "Blender', 'a greybox I am going to delete'. This is what picks " +
+            "the triangle budget. Write a sentence, not a form.",
+        ),
+      target: z
+        .enum([
+          "roblox",
+          "game_realtime",
+          "game_mobile",
+          "game_hero",
+          "scenery_lod",
+          "offline_render",
+          "fabrication",
+          "blockout",
+          "unspecified",
+        ])
+        .optional()
+        .describe(
+          "Override what `intent` would infer. Leave it out and say nothing " +
+            "about a target and it falls back to Roblox — and tells you it " +
+            "assumed that, because Roblox's 20,000 is an import cap and not a " +
+            "universal budget.",
+        ),
+      detail: z
+        .enum(["background", "prop", "hero"])
+        .optional()
+        .describe(
+          "How close the viewer gets, within the target's band. A background " +
+            "rock and a hero rock are the same prompt at different budgets.",
+        ),
+      target_faces: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          "Force the per-part budget. 0 means do not decimate at all — the " +
+            "raw mesh, which is what a render or a sculpt base wants. Use " +
+            "this when you know the part carries engraved detail, which is " +
+            "the first thing decimation destroys and the one thing no table " +
+            "can see.",
+        ),
+      lod: z
+        .boolean()
+        .optional()
+        .describe(
+          "Recommend an LOD chain. Nearly free — the raw mesh is already on " +
+            "disk and each extra level is ~0.3s of CPU with no GPU, against " +
+            "40s for another generation. build_lods executes it.",
+        ),
+      quantity: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          "How many of this thing you need. One hero rock is a generation; " +
+            "forty rocks is a script.",
+        ),
+      parts: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Part names you have already decided on. Each is routed through the " +
+            "archetype taxonomy — 'strut' scripts, 'escutcheon' generates. " +
+            "Naming more than one rules `single` out.",
+        ),
+      low_poly: z.boolean().optional(),
+      interior: z
+        .boolean()
+        .optional()
+        .describe(
+          "The asset opens or can be entered. Generated meshes are solid and " +
+            "usually refuse to be carved, so an interior means a scripted " +
+            "liner and therefore a hybrid.",
+        ),
+      max_generations: z
+        .number()
+        .int()
+        .optional()
+        .describe("A budget you are willing to spend. 0 forbids the GPU entirely."),
+      style: z.string().optional(),
+      seed: z.number().int().optional(),
+      notes: z.string().optional(),
+    },
+  },
+  async (args) => {
+    try {
+      const r = await api.chooseStrategy(args as api.StrategyRequest);
+      const blockers = r.warnings.filter((w) => w.severity === "blocker");
+      return json({
+        strategy: r.strategy,
+        headline: r.headline,
+        confidence: r.confidence,
+        why: r.reasoning,
+        not_chosen: r.alternatives,
+        budget: r.budget,
+        routing: r.routing,
+        cost: r.cost,
+        blockers,
+        other_warnings: r.warnings.filter((w) => w.severity !== "blocker"),
+        plan_warnings: r.plan_warnings,
+        draft_plan: r.plan,
+        this_plan_is_a_draft: r.draft_disclaimer,
+        next_steps: r.next_steps,
+      });
+    } catch (err) {
+      return failure(err instanceof Error ? err.message : String(err));
+    }
+  },
+);
+
+server.registerTool(
+  "part_archetypes",
+  {
+    title: "The routing taxonomy: what generates and what is written",
+    description:
+      "The measured verdicts behind plan_asset, so you can route parts " +
+      "yourself. Ornament, carving, creatures and organic mass go to the GPU; " +
+      "struts, bands, panels, wheels, planks, walls, floors, stairs, frames " +
+      "and any dimensioned surface are arithmetic; repeated parts are mirrors " +
+      "or reused job ids, never a second generation.\n\n" +
+      "Also returns the ceilings — the things the generator was measured to " +
+      "be unable to do at any prompt, such as an asymmetric surface feature " +
+      "on a body of revolution, an aerofoil section, or a window cut-out.\n\n" +
+      "Read this once and you can author plans without calling plan_asset.",
+    inputSchema: {},
+  },
+  async () => {
+    try {
+      return json(await api.strategyArchetypes());
+    } catch (err) {
+      return failure(err instanceof Error ? err.message : String(err));
+    }
+  },
+);
+
+server.registerTool(
+  "delivery_targets",
+  {
+    title: "Triangle budgets by where the asset is going",
+    description:
+      "What to decimate to, and why it depends on the destination rather " +
+      "than being a constant. 20,000 is Roblox's per-MeshPart import cap and " +
+      "coincidentally the measured decimation sweet spot, which is how the " +
+      "two came to be conflated everywhere — a realtime prop wants " +
+      "5,000-15,000, mobile 4,000, a distant LOD 1,500, a hero asset in the " +
+      "hand 40,000-200,000, and an offline render or a 3D print wants no " +
+      "decimation at all.\n\n" +
+      "Also explains the two knobs and why they are different: target_faces " +
+      "is what the mesh is decimated TO (cheap, reversible, and you can have " +
+      "several off one generation), while generation resolution is how much " +
+      "detail EXISTS before that — one-shot, expensive, and no budget " +
+      "recovers what was never generated.",
+    inputSchema: {},
+  },
+  async () => {
+    try {
+      return json(await api.strategyTargets());
+    } catch (err) {
+      return failure(err instanceof Error ? err.message : String(err));
+    }
+  },
+);
+
+server.registerTool(
+  "estimate_plan_cost",
+  {
+    title: "Price a plan before running it",
+    description:
+      "Wall time, GPU seconds, peak VRAM, triangles, file size and how many " +
+      "generations a decomposition plan will spend. Free, and the thing it " +
+      "prices is not — a twelve-part plan is several minutes of GPU and you " +
+      "should see that number before you commit to it rather than after.\n\n" +
+      "Wall time comes back as a range because generation is one: 30-49s " +
+      "measured across ten organic subjects, 79-151s on a solid box, because " +
+      "cost scales with occupied volume rather than with complexity. A dragon " +
+      "and a barrel cost the same; a crate costs four times either.\n\n" +
+      "The most useful line in the output is `savings`: what the scripted and " +
+      "mirrored parts of this plan did not cost. Scripting one part turns 40 " +
+      "seconds into 3 milliseconds.",
+    inputSchema: {
+      plan: z.record(z.unknown()).describe("A decompose plan."),
+      model_resident: z
+        .boolean()
+        .optional()
+        .describe(
+          "Whether a generator already holds VRAM. False adds Hunyuan3D's " +
+            "~70s cold weight load.",
+        ),
+      high_resolution: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Parts you intend to run at TRELLIS 2's 1024_cascade. Prices them " +
+            "at 102.7s instead of 38s, with a 900s timeout as the high end — " +
+            "that tier was killed at 21 minutes on a solid crate at 96% of " +
+            "VRAM.",
+        ),
+    },
+  },
+  async ({ plan, model_resident, high_resolution }) => {
+    try {
+      const cost = await api.costPlan({
+        plan,
+        model_resident,
+        high_resolution: high_resolution ? [...high_resolution] : undefined,
+      });
+      const warnings = await api.planWarnings(plan).catch(() => null);
+      return json({
+        ...cost,
+        ceilings: warnings?.warnings.filter((w) => w.severity === "blocker") ?? [],
+      });
+    } catch (err) {
+      return failure(err instanceof Error ? err.message : String(err));
+    }
+  },
+);
+
+server.registerTool(
+  "build_lods",
+  {
+    title: "Extra detail levels off a finished part",
+    description:
+      "Decimates a completed part to several triangle budgets, one new job " +
+      "per level. The cheapest thing in the pipeline and the least obvious: " +
+      "every job keeps its dense original as mesh_raw.glb and decimation is " +
+      "~0.3s, so a three-level chain is one generation plus under a second " +
+      "against three generations for three separate assets.\n\n" +
+      "Each level comes back as an ordinary job id, so it goes into " +
+      "assemble_parts, export_for_roblox and describe_part unchanged.\n\n" +
+      "Pick the numbers knowing what decimation actually costs: it spends its " +
+      "budget on curvature, so the silhouette survives aggressively and FINE " +
+      "SURFACE RELIEF is what dies. Measured on the same object, embossed " +
+      "lettering is legible at 20,000 and mush at 8,000 while the object " +
+      "around it still looks fine. It also breaks watertightness — engines do " +
+      "not care, 3D printing does.",
+    inputSchema: {
+      job_id: z.string().describe("A completed part."),
+      levels: z
+        .array(z.number().int())
+        .min(1)
+        .describe(
+          "Triangle budgets. The measured ladder is 40000 (indistinguishable " +
+            "from raw), 20000 (sweet spot, fine relief survives), 8000 " +
+            "(silhouette perfect, relief lost), then 2000 and 500 for " +
+            "distance.",
+        ),
+      from_raw: z
+        .boolean()
+        .optional()
+        .describe(
+          "Decimate from the dense original rather than the already-decimated " +
+            "mesh. Default true, and it matters: decimating a decimation " +
+            "compounds the loss.",
+        ),
+    },
+  },
+  async ({ job_id, levels, from_raw }) => {
+    try {
+      return json(await api.buildLods(job_id, [...levels], from_raw ?? true));
+    } catch (err) {
+      return failure(err instanceof Error ? err.message : String(err));
+    }
+  },
+);
+
+server.registerTool(
   "decomposition_examples",
   {
     title: "Worked decomposition plans",
@@ -379,6 +692,10 @@ server.registerTool(
     description:
       "Takes a decomposition plan and produces one mesh per part, returning " +
       "job ids and a ready-to-use parts list for assemble_parts.\n\n" +
+      "This tool assumes you have already decided that this object HAS parts " +
+      "and which ones. Call plan_asset first if you have not — for a skull " +
+      "the right answer is one generation and decomposing it would ruin it, " +
+      "and plan_asset is the thing that says so and prices the alternatives.\n\n" +
       "You author the plan — you know what you are building and the server " +
       "does not. Call decomposition_examples first for the format.\n\n" +
       "Each part is generate (its own image prompt -> 3D), script (a " +

@@ -112,6 +112,7 @@ The server URL is a field in the UI and is remembered; it seeds from `KITBASH_SE
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | The three processes and why the boundaries are where they are |
 | [PLAN.md](docs/PLAN.md) | What is done, what remains, deadline |
 | [SETUP-GPU.md](docs/SETUP-GPU.md) | Installing the inference stack on Windows without fighting the upstream pins |
+| [STRATEGY.md](docs/STRATEGY.md) | The decision layer: single vs hybrid vs scripted, the archetype taxonomy, the triangle budget, and what a build costs before it runs |
 | [WHAT-GENERATION-IS-FOR.md](docs/WHAT-GENERATION-IS-FOR.md) | Ten organic and ornate subjects measured against a scripted control — where the generator wins and where it loses |
 | [SHOWCASE-CHEST.md](docs/SHOWCASE-CHEST.md) | One asset end to end — 84 parts, generated and scripted, hollow, openable, Roblox-ready |
 | [DECIMATION.md](docs/DECIMATION.md) | How far a mesh reduces before it shows, with renders |

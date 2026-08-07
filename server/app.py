@@ -28,6 +28,7 @@ import orient as orienting
 import pipeline
 import preview as previewing
 import primitives
+import strategy as strategising
 import trellis
 
 logging.basicConfig(
@@ -771,6 +772,181 @@ def decomposition_examples():
     return {"examples": decompose.EXAMPLES}
 
 
+# --------------------------------------------------------------------------
+# strategy — the decision in front of everything else
+# --------------------------------------------------------------------------
+# /decompose executes a plan that has already committed to an approach. These
+# choose the approach, price it, and hand back a draft plan in that same
+# format. No LLM here either: server/strategy.py carries the measurements and
+# the arithmetic, and the agent carries the world knowledge. See
+# docs/STRATEGY.md.
+
+
+class StrategyRequest(BaseModel):
+    subject: str = Field(
+        ..., description="What to build, e.g. 'an ornate treasure chest'."
+    )
+    intent: str | None = Field(
+        None,
+        description=(
+            "Why you need it, in prose — 'a hero prop the player holds in "
+            "Unreal', 'distant scenery on mobile', 'a film render'. Read for "
+            "the delivery target and the viewing distance, which decide the "
+            "triangle budget. Prose rather than a form on purpose: the caller "
+            "is an agent describing a need."
+        ),
+    )
+    target: str | None = Field(
+        None,
+        description=(
+            f"Override what `intent` would infer. One of "
+            f"{sorted(strategising._TARGETS_BY_NAME)}; see GET "
+            f"/strategy/targets. Left unset and unstated, this falls back to "
+            f"Roblox and says so — 20,000 triangles is Roblox's per-MeshPart "
+            f"import cap and nothing else's."
+        ),
+    )
+    detail: str | None = Field(
+        None,
+        description=(
+            f"How close the viewer gets, within the target's band. One of "
+            f"{list(strategising.DETAIL_LEVELS)}. A background rock and a hero "
+            f"rock are the same prompt at different budgets."
+        ),
+    )
+    target_faces: int | None = Field(
+        None,
+        description=(
+            "Force the per-part triangle budget. 0 means do not decimate at "
+            "all, which is what an offline render or a sculpt base wants."
+        ),
+    )
+    lod: bool = Field(
+        False,
+        description=(
+            "Recommend a descending ladder of budgets off one generation. "
+            "Nearly free: the raw mesh is already on disk and each level is "
+            "~0.3 s of CPU with no GPU."
+        ),
+    )
+    quantity: int = Field(1, description="How many of this thing are needed.")
+    parts: list[str] | None = Field(
+        None,
+        description=(
+            "Part names you have already decided on. Routed individually "
+            "through the archetype taxonomy, and any value above one rules "
+            "`single` out."
+        ),
+    )
+    low_poly: bool | None = None
+    interior: bool | None = None
+    max_generations: int | None = Field(
+        None, description="0 forbids the GPU entirely."
+    )
+    style: str | None = Field(
+        None,
+        description=(
+            "Shared style suffix for generated parts. Drafted from the family "
+            "if omitted. Materials, palette and light only — never the subject "
+            "noun."
+        ),
+    )
+    seed: int = 20260806
+    name: str | None = None
+    notes: str | None = None
+
+
+@api.post("/strategy")
+def choose_strategy(req: StrategyRequest):
+    """Recommend single / hybrid / scripted, with the evidence and the price.
+
+    The one endpoint that decides rather than executes. It returns a draft
+    `decompose` plan that validates, so the answer can be run unchanged — and
+    it labels that plan a draft, because the server cannot know how big this
+    subject really is or what this particular one has that the generic version
+    does not.
+    """
+    try:
+        return strategising.recommend(req.model_dump(exclude_none=True))
+    except strategising.StrategyError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except decompose.DecomposeError as exc:  # a draft that will not validate
+        raise HTTPException(500, f"drafted an invalid plan: {exc}") from exc
+
+
+@api.get("/strategy/archetypes")
+def strategy_archetypes():
+    """The routing taxonomy: which kinds of part generate and which are written.
+
+    Served rather than documented for the same reason GET /primitives is — a
+    rule an agent has to be told about is a rule it gets wrong once per
+    session. Every verdict carries the measurement that produced it.
+    """
+    return strategising.taxonomy()
+
+
+@api.get("/strategy/targets")
+def strategy_targets():
+    """Delivery targets and the triangle budgets they imply.
+
+    The companion to the archetypes, and a correction: 20,000 triangles is
+    Roblox's per-MeshPart cap, and this project has been applying it as a
+    universal default without marking it as an assumption. An offline render
+    wants no decimation at all; a distant LOD wants 1,500.
+    """
+    return strategising.targets()
+
+
+class CostRequest(BaseModel):
+    plan: dict = Field(..., description="A decompose plan. See GET /decompose/examples.")
+    model_resident: bool = Field(
+        False,
+        description=(
+            "Whether a generator already holds VRAM. False adds Hunyuan3D's "
+            "~70 s cold weight load to the estimate."
+        ),
+    )
+    high_resolution: list[str] | None = Field(
+        None,
+        description=(
+            "Parts you intend to run at TRELLIS 2's `1024_cascade`. Prices "
+            "them at 102.7 s rather than 38 s, with the 900 s timeout as the "
+            "high end — that tier was killed at 21 minutes on a solid crate."
+        ),
+    )
+
+
+@api.post("/strategy/cost")
+def cost_plan(req: CostRequest):
+    """Price a plan you already have, before running it.
+
+    Free, and the thing it prices is not. Wall time, GPU seconds, peak VRAM,
+    triangles, file size and how many generations it will spend — the numbers
+    that turn "this took forty minutes" into a decision made beforehand.
+    """
+    try:
+        return strategising.cost(
+            req.plan, req.model_resident, set(req.high_resolution or ())
+        )
+    except decompose.DecomposeError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@api.post("/strategy/warnings")
+def plan_warnings(plan: dict):
+    """The measured ceilings a plan is about to walk into, before it spends GPU.
+
+    Separate from /strategy/cost because they answer different questions: cost
+    says what it will take, this says what it will not produce however long you
+    wait for it. An asymmetric surface feature, an aerofoil section and a
+    window cut-out are all things no amount of re-prompting reaches.
+    """
+    try:
+        return {"warnings": strategising.warnings_for(plan)}
+    except decompose.DecomposeError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 class HollowRequest(BaseModel):
     job_id: str = Field(..., description="A completed job to hollow out")
     wall_thickness: float = Field(0.04, description="In the mesh's own units")
@@ -881,6 +1057,122 @@ def describe_part(job_id: str):
     if job["status"] != jobs.DONE:
         raise HTTPException(409, f"job is {job['status']}, not done")
     return assembly.describe(Path(job["result"]["mesh_path"]))
+
+
+class LodRequest(BaseModel):
+    levels: list[int] = Field(
+        ...,
+        description=(
+            "Triangle budgets, one new job per level. Descending is "
+            "conventional but not required."
+        ),
+    )
+    from_raw: bool = Field(
+        True,
+        description=(
+            "Decimate from `mesh_raw.glb` when it exists. Decimating an "
+            "already-decimated mesh compounds the loss, and the dense original "
+            "is kept precisely so it does not have to."
+        ),
+    )
+
+
+@api.post("/jobs/{job_id}/lod")
+def build_lods(job_id: str, req: LodRequest):
+    """Extra decimation levels off a finished part. One generation, N meshes.
+
+    This is the cheapest thing in the pipeline and the least obvious. Every job
+    writes `mesh_raw.glb` alongside its decimated `mesh.glb`, and quadric
+    decimation is ~0.3 s — so a three-level LOD chain is one generation plus
+    under a second, against three generations for three separate assets.
+
+    Each level lands as its own job record with the same shape as any other, so
+    the ids go straight into /assemble, /export and /jobs/{id}/describe. That
+    is the same interchangeability rule that lets a scripted part stand beside
+    a generated one.
+
+    Decimation is lossy in one specific way worth knowing before you pick the
+    numbers: it spends its budget on curvature, so silhouette survives
+    aggressively and *fine surface relief* is what dies. Measured, embossed
+    lettering is legible at 20,000 and mush at 8,000 while the object around it
+    still looks fine. It also breaks watertightness, which engines do not care
+    about and 3D printing does.
+    """
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, f"no such job: {job_id}")
+    if job["status"] != jobs.DONE:
+        raise HTTPException(409, f"job is {job['status']}, not done")
+    if not req.levels:
+        raise HTTPException(400, "give at least one triangle budget in `levels`")
+    if any(n < 4 for n in req.levels):
+        raise HTTPException(
+            400, f"every level must be at least 4 triangles, got {req.levels}"
+        )
+
+    decimated = Path(job["result"]["mesh_path"])
+    raw = decimated.parent / "mesh_raw.glb"
+    source = raw if (req.from_raw and raw.exists()) else decimated
+
+    import trimesh  # local: app.py should stay importable without a mesh stack
+
+    loaded = trimesh.load(str(source), process=False, force="mesh")
+    available = int(len(loaded.faces))
+
+    out = []
+    for level in req.levels:
+        lod_id = uuid.uuid4().hex[:12]
+        lod_dir = config.OUT_DIR / lod_id
+        lod_dir.mkdir(parents=True, exist_ok=True)
+        path = lod_dir / "mesh.glb"
+        started = time.time()
+        if level >= available:
+            # Not an error: asking for more triangles than exist is what
+            # happens when a caller lists a ladder without knowing the raw
+            # count, and the honest answer is the mesh unchanged.
+            mesh = loaded
+        else:
+            mesh = loaded.simplify_quadric_decimation(face_count=level)
+        mesh.export(str(path))
+        result = {
+            "mesh_path": str(path),
+            "generation_seconds": round(time.time() - started, 3),
+            "peak_vram_gib": 0.0,
+            "vertices": int(len(mesh.vertices)),
+            "faces": int(len(mesh.faces)),
+            "decimated_from": available if level < available else None,
+            "watertight": bool(mesh.is_watertight),
+            "file_bytes": path.stat().st_size,
+            "material": (job.get("result") or {}).get("material"),
+        }
+        now = time.time()
+        record = {
+            "id": lod_id, "type": "lod", "status": jobs.DONE,
+            "created_at": now, "started_at": now, "finished_at": time.time(),
+            "params": {"source_job": job_id, "target_faces": level,
+                       "source": source.name},
+            "result": result, "error": None,
+        }
+        _record(record)
+        out.append({"job_id": lod_id, "requested": level,
+                    "faces": result["faces"], "seconds": result["generation_seconds"],
+                    "file_bytes": result["file_bytes"],
+                    "watertight": result["watertight"]})
+
+    return {
+        "source_job": job_id,
+        "source": source.name,
+        "source_faces": available,
+        "levels": out,
+        "note": (
+            "One generation, several meshes. Each level is an ordinary job id: "
+            "pass it to /assemble, /export or /jobs/{id}/describe unchanged."
+            + ("" if source.name == "mesh_raw.glb" else
+               " Decimated from the already-decimated mesh — no mesh_raw.glb "
+               "was written for this job, which happens when the original was "
+               "already at or under its budget.")
+        ),
+    }
 
 
 class ExportRequest(BaseModel):

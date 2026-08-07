@@ -131,6 +131,99 @@ export function decomposeExamples(): Promise<{ examples: Record<string, unknown>
   return request("/decompose/examples", undefined, 20_000);
 }
 
+export interface StrategyRequest {
+  subject: string;
+  intent?: string;
+  target?: string;
+  detail?: string;
+  target_faces?: number;
+  lod?: boolean;
+  quantity?: number;
+  parts?: string[];
+  low_poly?: boolean;
+  interior?: boolean;
+  max_generations?: number;
+  style?: string;
+  seed?: number;
+  name?: string;
+  notes?: string;
+}
+
+export interface Recommendation {
+  subject: string;
+  strategy: "single" | "hybrid" | "scripted";
+  family: string;
+  headline: string;
+  confidence: { level: string; margin: number; why: string };
+  reasoning: { saw: string; claim: string; evidence: string; source: string }[];
+  scores: Record<string, number | null>;
+  alternatives: { strategy: string; why_not: string; when_it_would_win: string }[];
+  routing: { part: string; mode: string; archetype: string | null; why: string }[];
+  budget: Record<string, unknown>;
+  warnings: { code: string; severity: string; message: string; evidence: string;
+              source: string; part: string | null }[];
+  plan_warnings: string[];
+  cost: Record<string, any>;
+  plan: Record<string, unknown>;
+  draft_disclaimer: string;
+  next_steps: string[];
+}
+
+/** The decision layer. Pure CPU on the server — no GPU, milliseconds. */
+export function chooseStrategy(body: StrategyRequest): Promise<Recommendation> {
+  return request<Recommendation>("/strategy", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }, 30_000);
+}
+
+export function strategyArchetypes(): Promise<Record<string, unknown>> {
+  return request("/strategy/archetypes", undefined, 20_000);
+}
+
+export function strategyTargets(): Promise<Record<string, unknown>> {
+  return request("/strategy/targets", undefined, 20_000);
+}
+
+export function costPlan(body: {
+  plan: unknown;
+  model_resident?: boolean;
+  high_resolution?: string[];
+}): Promise<Record<string, any>> {
+  return request("/strategy/cost", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }, 30_000);
+}
+
+export function planWarnings(plan: unknown): Promise<{
+  warnings: { code: string; severity: string; message: string;
+              evidence: string; source: string; part: string | null }[];
+}> {
+  return request("/strategy/warnings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(plan),
+  }, 30_000);
+}
+
+export function buildLods(jobId: string, levels: number[], fromRaw = true): Promise<{
+  source_job: string;
+  source: string;
+  source_faces: number;
+  levels: { job_id: string; requested: number; faces: number; seconds: number;
+            file_bytes: number; watertight: boolean }[];
+  note: string;
+}> {
+  return request(`/jobs/${jobId}/lod`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ levels, from_raw: fromRaw }),
+  }, 120_000);
+}
+
 export function generators(): Promise<unknown> {
   return request("/generators", undefined, 15_000);
 }
