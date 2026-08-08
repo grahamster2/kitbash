@@ -24,6 +24,7 @@ other as top-level names (`import config`) the way uvicorn runs them.
 | `test_assemble.py` | `_transform` composition order, node-name deduplication, `describe()`, multi-part scenes |
 | `test_export.py` | the per-geometry triangle budget, `height_studs`, the roblox vs dcc pivot, texture/vertex-colour warnings |
 | `test_primitives.py` | the scripted library: every kind watertight, dimensioned as requested and under the face cap; the catalogue schema; parameter validation |
+| `test_materials.py` | the material library: the four tables and their invariants, every generated map's colour/contrast/tiling, and how a material attaches to a mesh without losing what the mesh already carried |
 | `test_app.py` | every endpoint via `TestClient`, including the `/export/file` traversal guard and that a scripted part assembles and exports like a generated one |
 
 ## What is deliberately not covered

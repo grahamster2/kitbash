@@ -36,6 +36,10 @@ log = logging.getLogger("kitbash.primitives")
 
 _EPS = 1e-9
 
+# Where `build` leaves "this was watertight before the UV split". Read and
+# removed by `store` so it never reaches the exported file's glTF extras.
+CLOSED_SOLID = "kitbash_closed_solid"
+
 
 # --- low-level geometry ------------------------------------------------------
 
@@ -2737,8 +2741,22 @@ def _material_for(spec, part_name: str | None, explicit: str | None) -> str:
 
 def build(kind: str, params: dict | None = None, part_name: str | None = None,
           material: str | None = None, color: str | None = None,
-          uv_scale: float | None = None) -> trimesh.Trimesh:
-    """Build one primitive as a finished, materialled, origin-centred mesh."""
+          uv_scale: float | None = None, texture: bool | None = None
+          ) -> trimesh.Trimesh:
+    """Build one primitive as a finished, materialled, origin-centred mesh.
+
+    `texture=True` attaches the family's generated maps and box-projects UVs at
+    the tile size the *material* asks for — a brick is the same size on a
+    gatehouse as on a garden wall, so the scale cannot come from the part.
+    `uv_scale` overrides that tile size for a caller who wants bigger bricks.
+
+    It is **off** here and on in `store`, and the asymmetry is the point:
+    `build` returns a *solid* and `store` writes an *asset*. Unwrapping splits
+    every vertex at a projection seam, so a textured mesh is no longer welded —
+    the solid is unchanged and no hole opens, but `is_watertight` goes false
+    because it is an index-level test. Leaving the split until the mesh becomes
+    a file keeps that property measurable where it means something.
+    """
     resolved = resolve(kind, params)
     spec = KINDS[kind]
     mesh = _center(spec.build(**resolved))
@@ -2750,9 +2768,22 @@ def build(kind: str, params: dict | None = None, part_name: str | None = None,
             f"(sections, plank_count, steps, ...)"
         )
 
-    materials.apply_to_mesh(mesh, part_name or kind, _material_for(spec, part_name, material), color)
-    if uv_scale:
-        mesh.visual.uv = _unwrap(mesh, uv_scale)
+    family = materials.apply_to_mesh(
+        mesh, part_name or kind, _material_for(spec, part_name, material), color,
+        texture=bool(texture),
+    )
+    # An explicit uv_scale means "unwrap, at this size" whether or not the
+    # family has a map — that was its meaning before and callers rely on it.
+    scale = uv_scale or (materials.tile_studs(family) if texture else None)
+    if scale:
+        # Noted before the split, because it cannot be recovered after it.
+        # `is_watertight` counts faces per *index pair*, so duplicating a vertex
+        # to give it a second UV reads as an open edge even though no hole
+        # opened — and re-welding by position afterwards is not the inverse:
+        # it also fuses the deliberately-coincident vertices `_combine` leaves
+        # where two closed components touch, which really does break the solid.
+        mesh.metadata[CLOSED_SOLID] = bool(mesh.is_watertight)
+        mesh.visual.uv = _unwrap(mesh, scale)
     return mesh
 
 
@@ -2762,14 +2793,29 @@ def _family_of(mesh) -> str | None:
     return name.removeprefix("kitbash_") or None
 
 
-def store(kind: str, params: dict | None, out_dir: Path, **kwargs) -> dict:
+def store(kind: str, params: dict | None, out_dir: Path,
+          texture: bool | None = None, **kwargs) -> dict:
     """Build and write mesh.glb, returning the same result shape as
     pipeline.generate_shape so a scripted part is indistinguishable from a
-    generated one everywhere downstream."""
+    generated one everywhere downstream.
+
+    `texture` defaults to on wherever the family has a generated map. This is
+    the file-writing path — what comes out is an asset somebody drops into a
+    game engine, and an asset that arrives as one flat colour is the thing
+    docs/SHOWCASE-CHEST.md called the biggest gap in the scripted layer. Pass
+    False for the untextured solid.
+    """
     t0 = time.time()
     resolved = resolve(kind, params)
-    mesh = build(kind, resolved, **kwargs)
+    if texture is None:
+        family, _ = materials.resolve(
+            kwargs.get("part_name") or kind,
+            _material_for(KINDS[kind], kwargs.get("part_name"), kwargs.get("material")),
+        )
+        texture = materials.has_texture(family)
+    mesh = build(kind, resolved, texture=texture, **kwargs)
     elapsed = time.time() - t0
+    closed = bool(mesh.metadata.pop(CLOSED_SOLID, mesh.is_watertight))
 
     out_dir.mkdir(parents=True, exist_ok=True)
     mesh_path = out_dir / "mesh.glb"
@@ -2788,7 +2834,10 @@ def store(kind: str, params: dict | None, out_dir: Path, **kwargs) -> dict:
         # of; re-deriving it from a node name later can only lose information —
         # "barrel" reads as gun barrel and would come back metal.
         "material": _family_of(mesh),
-        "watertight": bool(mesh.is_watertight),
+        "textured": bool(getattr(mesh.visual, "uv", None) is not None),
+        # The solid, not the index buffer — see build(). A textured part has
+        # split UV seams and no holes, and it is the holes anyone cares about.
+        "watertight": closed,
         "file_bytes": mesh_path.stat().st_size,
         "size": [round(float(v), 4) for v in (hi - lo)],
         "bounds_min": [round(float(v), 4) for v in lo],

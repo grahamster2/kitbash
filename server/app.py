@@ -381,9 +381,13 @@ class PrimitiveRequest(BaseModel):
     uv_scale: float | None = Field(
         None,
         description=(
-            "Emit box-projection UVs at one texture tile per this many studs. "
-            "Off by default: it splits vertices at every seam, which ends the "
-            "welded topology, and nothing downstream has a texture yet."
+            "Texture tile size, in studs. Override the material's own default "
+            "when the pattern should line up with the geometry — brick courses "
+            "against a brick-relief wall, for instance.\n"
+            "A stored part is already textured wherever its material family "
+            "has a map, so this is a scale, not a switch. Unwrapping splits "
+            "vertices at every seam and so ends the welded topology; that is "
+            "why `build` returns the solid and `store` writes the asset."
         ),
     )
 
