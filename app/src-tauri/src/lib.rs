@@ -19,6 +19,10 @@ const MESH_TIMEOUT: Duration = Duration::from_secs(120);
 // Assemble and export both do real mesh work on the server — loading every
 // source part, welding, and for Roblox decimating each mesh to the triangle cap.
 const WORK_TIMEOUT: Duration = Duration::from_secs(300);
+// A candidate batch is four round-trips to a hosted image provider behind one
+// request. Four seconds is typical; a rate-limited or retried provider is not,
+// and failing that at the 20s JSON timeout would look like a server fault.
+const IMAGE_TIMEOUT: Duration = Duration::from_secs(180);
 
 fn client(timeout: Duration) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
@@ -143,6 +147,35 @@ async fn fetch_mesh(base_url: String, id: String) -> Result<Response, String> {
         .map(Response::new)
 }
 
+/// Prompt -> several reference images to choose between, in one request.
+#[tauri::command]
+async fn create_candidates(base_url: String, body: Value) -> Result<Value, String> {
+    post_json(&base_url, "/images/candidates", &body, IMAGE_TIMEOUT).await
+}
+
+/// Re-reads a batch. The POST returns the finished set, so this only earns its
+/// keep against a server that fills a batch in behind an early response.
+#[tauri::command]
+async fn get_batch(base_url: String, id: String) -> Result<Value, String> {
+    get_json(&base_url, &format!("/images/batches/{id}")).await
+}
+
+/// One image from one prompt — the pre-batch endpoint, kept as the fallback for
+/// a server that has not been updated yet.
+#[tauri::command]
+async fn create_image(base_url: String, body: Value) -> Result<Value, String> {
+    post_json(&base_url, "/images", &body, IMAGE_TIMEOUT).await
+}
+
+/// Returns raw PNG bytes for a candidate. Same `Response` treatment as the
+/// meshes — see `fetch_mesh`; the JS side turns these into a blob URL.
+#[tauri::command]
+async fn fetch_image(base_url: String, id: String) -> Result<Response, String> {
+    get_bytes(&base_url, &format!("/images/{id}"), MESH_TIMEOUT)
+        .await
+        .map(Response::new)
+}
+
 #[tauri::command]
 async fn fetch_scene(base_url: String, id: String) -> Result<Response, String> {
     get_bytes(&base_url, &format!("/scenes/{id}/mesh"), MESH_TIMEOUT)
@@ -190,6 +223,10 @@ pub fn run() {
             submit_job,
             assemble,
             export,
+            create_candidates,
+            get_batch,
+            create_image,
+            fetch_image,
             fetch_mesh,
             fetch_scene,
             download_exported_file

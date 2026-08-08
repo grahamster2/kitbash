@@ -17,12 +17,20 @@ Three provider tiers, one interface:
 
 Only stdlib HTTP here. The install story is already the hardest part of this
 project on Windows and a provider is not worth another dependency.
+
+The second half of this module is candidate batches: several references for one
+prompt, generated concurrently and returned unchosen, because image-to-3D is
+decided by its reference and picking it is the one judgement in this pipeline a
+human is better at than the machine. See docs/REFERENCE-SELECTION.md.
 """
 import json
 import logging
+import random
+import time
 import urllib.error
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import config
@@ -35,19 +43,34 @@ FAL_QUEUE = "https://queue.fal.run"
 # object on a plain background reconstructs well; a scene with ground plane,
 # horizon and props produces a mesh with all of that fused into it. Callers
 # describe the object and this supplies the framing.
+#
+# `{view}` is a slot rather than a literal so a candidate batch can move the
+# camera without rewriting the negatives, which are the part that actually
+# earns its place.
 FRAMING = (
-    "single isolated {subject}, centered, three-quarter view, full object "
+    "single isolated {subject}, centered, {view}, full object "
     "visible, plain flat white background, even studio lighting, no shadows on "
     "the background, no ground plane, no scenery, no text, no watermark"
 )
+
+DEFAULT_VIEW = "three-quarter view"
 
 
 class ImageGenError(Exception):
     pass
 
 
-def _framed(prompt: str) -> str:
-    return FRAMING.format(subject=prompt.strip().rstrip("."))
+def _framed(prompt: str, view: str | None = None, style: str | None = None) -> str:
+    """Wrap a subject in the framing, optionally re-aiming the camera.
+
+    `style` goes *after* the framing rather than beside the subject: dropped in
+    next to `{subject}` it reads as part of the noun phrase, and the negatives
+    ("no ground plane", "no scenery") stop applying to whatever it added.
+    """
+    framed = FRAMING.format(
+        subject=prompt.strip().rstrip("."), view=view or DEFAULT_VIEW
+    )
+    return f"{framed}, {style.strip().rstrip('.')}" if style else framed
 
 
 class FalProvider:
@@ -98,14 +121,19 @@ class FalProvider:
             raise ImageGenError(f"could not reach fal.ai: {exc.reason}") from exc
 
     def generate(self, prompt: str, image_size: str = "square_hd",
-                 seed: int | None = None, poll_seconds: int = 120) -> bytes:
+                 seed: int | None = None, poll_seconds: int = 120,
+                 view: str | None = None, style: str | None = None) -> bytes:
         if not self.available():
             raise ImageGenError(
                 "No fal.ai API key. Set FAL_KEY, or switch providers with "
                 "KITBASH_IMAGE_PROVIDER."
             )
 
-        payload = {"prompt": _framed(prompt), "image_size": image_size, "num_images": 1}
+        payload = {
+            "prompt": _framed(prompt, view=view, style=style),
+            "image_size": image_size,
+            "num_images": 1,
+        }
         if seed is not None:
             payload["seed"] = int(seed)
 
@@ -250,3 +278,220 @@ def load_b64(image_id: str) -> str:
     if not path.exists():
         raise FileNotFoundError(f"no such image: {image_id}")
     return base64.b64encode(path.read_bytes()).decode()
+
+
+# --------------------------------------------------------------------------
+# candidate batches — several references for one prompt, so a human can choose
+# --------------------------------------------------------------------------
+# Image-to-3D is decided by its reference. One prompt giving one image means the
+# reference is whatever the model happened to imagine, and the one place a human
+# could exercise judgement — which of these is the object I meant? — never
+# happens. See docs/REFERENCE-SELECTION.md.
+
+# Mechanical variation, for when the caller supplies no `variants` of its own.
+#
+# These are *interpretations*, not seeds: a weathered crate and a sleek crate
+# are different objects, and four seeds of one prompt are four photographs of
+# the same one. They name only surface, construction and viewpoint — never a
+# parent object — because naming the whole object in a suffix re-arms the
+# completion prior that returns a propeller attached to an aeroplane
+# (docs/DECOMPOSITION.md, "The suffix must not name the whole object").
+#
+# Every entry keeps a three-quarter-ish camera. A profile or a plan view varies
+# the picture nicely and ruins it as a reconstruction input, which is the one
+# thing these images are for.
+VARIATIONS: list[dict] = [
+    # First is deliberately the plain framing: one candidate is always exactly
+    # what POST /images would have returned, so choosing costs nothing.
+    {"label": None, "view": None, "style": None},
+    {
+        "label": "weathered",
+        "view": None,
+        "style": "heavily weathered and worn, chipped and scratched surfaces, "
+                 "aged patina, grime in the recesses, photorealistic",
+    },
+    {
+        "label": "ornate",
+        "view": "three-quarter view from a slightly low angle",
+        "style": "ornate and elaborately decorated, intricate carved relief, "
+                 "inlaid trim, rich contrasting materials",
+    },
+    {
+        "label": "stylised",
+        "view": "three-quarter view from a slightly high angle",
+        "style": "stylised low-poly game asset, simplified flat planes, bold "
+                 "chunky silhouette, flat matte colours, clean edges",
+    },
+    {
+        "label": "sleek",
+        "view": None,
+        "style": "sleek minimal modern design, smooth uninterrupted surfaces, "
+                 "restrained detail, brushed metal and matte finish",
+    },
+    {
+        "label": "rugged",
+        "view": "three-quarter view from a slightly low angle",
+        "style": "rugged heavy-duty construction, thick reinforced edges, "
+                 "exposed fasteners and bracing, utilitarian and unpainted",
+    },
+]
+
+# Four fal calls is four times the bill of one. A cap keeps a typo'd `count`
+# from turning into a hundred of them.
+MAX_CANDIDATES = 8
+
+
+def batch_dir() -> Path:
+    return image_dir() / "batches"
+
+
+def batch_path(batch_id: str) -> Path:
+    return batch_dir() / f"{batch_id}.json"
+
+
+def load_batch(batch_id: str) -> dict:
+    """A previously generated batch, for polling and re-display.
+
+    On disk rather than in memory on purpose: the desktop app and the MCP server
+    are separate processes from whatever generated the batch, and a batch that
+    only one of them can see is a batch the user cannot choose from.
+    """
+    path = batch_path(batch_id)
+    if not path.exists():
+        raise FileNotFoundError(f"no such batch: {batch_id}")
+    return json.loads(path.read_text())
+
+
+def _candidate_specs(prompt: str, count: int, variants: list[str] | None,
+                     seed: int | None) -> list[dict]:
+    """What each of the N calls should ask for.
+
+    Distinct seeds throughout. They buy almost nothing on their own — the same
+    prompt at two seeds is the same object twice (docs/DECOMPOSITION.md) — but
+    they cost nothing either, and every seed is reported back so a caller can
+    re-roll exactly one candidate.
+    """
+    specs = []
+    for i in range(count):
+        if variants:
+            variant = variants[i % len(variants)]
+            spec = {"prompt": variant, "variant": variant, "view": None,
+                    "style": None}
+        else:
+            v = VARIATIONS[i % len(VARIATIONS)]
+            spec = {"prompt": prompt, "variant": v["label"], "view": v["view"],
+                    "style": v["style"]}
+        # A caller's seed makes the whole batch reproducible; without one the
+        # candidates still have to differ from each other, hence per-candidate
+        # randomness rather than a single None.
+        spec["seed"] = int(seed) + i if seed is not None else random.randrange(2**31)
+        specs.append(spec)
+    return specs
+
+
+def generate_candidates(prompt: str, count: int = 4,
+                        variants: list[str] | None = None,
+                        image_size: str = "square_hd", seed: int | None = None,
+                        remove_background: bool = True,
+                        provider=None) -> dict:
+    """N reference images for one prompt, generated concurrently.
+
+    Concurrency is the whole reason this is not a loop in the caller: a fal
+    round trip is ~4 s of *waiting on a socket*, so four sequential calls are
+    ~16 s and four threads are ~4 s. `imagegen` is stdlib urllib and blocks, so
+    threads release the GIL for the entire call.
+
+    Storage is deliberately serial. `store()` runs rembg, which lazily builds a
+    process-wide inference session on first use; several threads racing to
+    create it is a hazard for something that only costs a few hundred
+    milliseconds per image.
+
+    One candidate failing does not fail the batch — three usable references are
+    worth having, and the caller is told which slot was lost and why.
+    """
+    if count < 1:
+        raise ImageGenError("count must be at least 1")
+    if count > MAX_CANDIDATES:
+        raise ImageGenError(
+            f"count must be at most {MAX_CANDIDATES}; each candidate is a "
+            f"separate billed image call"
+        )
+    if variants is not None and not variants:
+        raise ImageGenError("variants was given but empty; omit it instead")
+
+    provider = provider or get_provider()
+    specs = _candidate_specs(prompt, count, variants, seed)
+    started = time.time()
+
+    def _fetch(spec: dict):
+        return provider.generate(
+            spec["prompt"], image_size=image_size, seed=spec["seed"],
+            view=spec["view"], style=spec["style"],
+        )
+
+    with ThreadPoolExecutor(max_workers=count, thread_name_prefix="imagegen") as pool:
+        raws = list(pool.map(_lift_errors(_fetch), specs))
+
+    candidates, failed = [], []
+    for index, (spec, (raw, error)) in enumerate(zip(specs, raws)):
+        if error is not None:
+            failed.append({"index": index, "variant": spec["variant"],
+                           "prompt": spec["prompt"], "seed": spec["seed"],
+                           "error": str(error)})
+            continue
+        image_id, path = store(raw, remove_background)
+        candidates.append({
+            "image_id": image_id,
+            "prompt": spec["prompt"],
+            "variant": spec["variant"],
+            "seed": spec["seed"],
+            "bytes": path.stat().st_size,
+            "path": str(path),
+        })
+
+    if not candidates:
+        raise ImageGenError(
+            f"every one of the {count} candidates failed: "
+            + "; ".join(f["error"] for f in failed)
+        )
+
+    elapsed = round(time.time() - started, 2)
+    batch_id = uuid.uuid4().hex[:12]
+    batch = {
+        "batch_id": batch_id,
+        "prompt": prompt,
+        "candidates": candidates,
+        # Cost visibility. Four images is four billed calls, and nobody should
+        # find that out from an invoice.
+        "count": len(candidates),
+        "requested": count,
+        "elapsed_seconds": elapsed,
+        "provider": provider.name,
+        "mode": "variants" if variants else "mechanical",
+        "image_size": image_size,
+        "failed": failed,
+        "created_at": time.time(),
+    }
+    path = batch_path(batch_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(batch, indent=2))
+    log.info("batch %s: %d/%d candidates in %.2fs (%s)",
+             batch_id, len(candidates), count, elapsed, batch["mode"])
+    return batch
+
+
+def _lift_errors(fn):
+    """Turn a raising call into `(value, error)`.
+
+    ThreadPoolExecutor.map re-raises the first exception and abandons the rest,
+    which would throw away images that were already paid for.
+    """
+
+    def wrapped(spec):
+        try:
+            return fn(spec), None
+        except Exception as exc:  # a provider error, or anything it wrapped
+            log.warning("candidate failed: %s", exc)
+            return None, exc
+
+    return wrapped

@@ -743,6 +743,84 @@ def create_image(req: ImageRequest):
     }
 
 
+class CandidateRequest(BaseModel):
+    """Several references for one prompt, so a human can pick the good one.
+
+    Image-to-3D is decided almost entirely by its reference — the same
+    generator, the same settings and a different picture is a different object.
+    One prompt giving one image means nobody ever exercises that choice. See
+    docs/REFERENCE-SELECTION.md.
+    """
+
+    prompt: str = Field(..., description="What the object is, e.g. 'a treasure chest'")
+    count: int = Field(
+        4,
+        ge=1,
+        le=imagegen.MAX_CANDIDATES,
+        description=(
+            f"How many candidates to generate, 1-{imagegen.MAX_CANDIDATES}. Each "
+            f"one is a separate billed image call; they run concurrently, so "
+            f"four cost four calls and about the wall time of one."
+        ),
+    )
+    variants: list[str] | None = Field(
+        None,
+        description=(
+            "Full prompt variations, one per candidate — the intended path, and "
+            "the one that gives the best results. The caller is an LLM with the "
+            "world knowledge to invent four genuinely different interpretations "
+            "of 'a treasure chest'; the server only has a fixed list of "
+            "adjectives. Omit this and it falls back to that list.\n"
+            "Same rule as a decomposition style suffix: describe the object, "
+            "never the larger thing it belongs to."
+        ),
+    )
+    image_size: str | None = Field(None, description="Default 'square_hd'.")
+    seed: int | None = Field(
+        None,
+        description=(
+            "Base seed. Candidate i uses seed+i, so a batch is reproducible and "
+            "no two candidates share a seed. Omitted means random seeds."
+        ),
+    )
+    remove_background: bool = True
+    provider: str | None = None
+
+
+@api.post("/images/candidates")
+def create_candidates(req: CandidateRequest):
+    """Generate N reference images at once and return all of them, unchosen.
+
+    Deliberately returns every candidate rather than picking one. The choice is
+    the point: pass the winning `image_id` to POST /jobs.
+    """
+    try:
+        return imagegen.generate_candidates(
+            req.prompt,
+            count=req.count,
+            variants=req.variants,
+            image_size=req.image_size or "square_hd",
+            seed=req.seed,
+            remove_background=req.remove_background,
+            provider=imagegen.get_provider(req.provider),
+        )
+    except imagegen.ImageGenError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@api.get("/images/batches/{batch_id}")
+def get_candidate_batch(batch_id: str):
+    """A batch as it was returned, for polling or re-display.
+
+    Read from disk, so the desktop app can show a batch the MCP server made and
+    a restart does not lose one the user has not chosen from yet.
+    """
+    try:
+        return imagegen.load_batch(batch_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
 @api.get("/images/providers")
 def image_providers():
     return {"providers": imagegen.provider_status()}

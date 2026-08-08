@@ -91,7 +91,11 @@ export function health(): Promise<Health> {
 }
 
 export function submitJob(body: {
-  image_b64: string;
+  // Exactly one of these. image_id reuses a reference already on the server,
+  // which is how a chosen candidate reaches generation without the picture
+  // making a base64 round trip through the agent's context.
+  image_b64?: string;
+  image_id?: string;
   part_name?: string;
   seed?: number;
   target_faces?: number;
@@ -382,6 +386,63 @@ export function previewScene(
   opts: PreviewOptions = {},
 ): Promise<Uint8Array> {
   return fetchPng(`/scenes/${sceneId}/preview${previewQuery(opts)}`);
+}
+
+// --- candidate reference images --------------------------------------------
+
+export interface Candidate {
+  image_id: string;
+  prompt: string;
+  variant: string | null;
+  seed: number;
+  bytes: number;
+  path: string;
+}
+
+export interface CandidateBatch {
+  batch_id: string;
+  prompt: string;
+  candidates: Candidate[];
+  count: number;
+  requested: number;
+  elapsed_seconds: number;
+  provider: string;
+  mode: "variants" | "mechanical";
+  image_size: string;
+  failed: { index: number; variant: string | null; prompt: string;
+            seed: number; error: string }[];
+  created_at: number;
+}
+
+/**
+ * N reference images for one prompt, all of them unchosen.
+ *
+ * The server generates them concurrently, so four candidates cost four billed
+ * image calls and roughly the wall time of one. 120s rather than the default
+ * 30: a slow queue at the provider stalls the whole batch.
+ */
+export function generateCandidates(body: {
+  prompt: string;
+  count?: number;
+  variants?: string[];
+  image_size?: string;
+  seed?: number;
+  remove_background?: boolean;
+}): Promise<CandidateBatch> {
+  return request<CandidateBatch>("/images/candidates", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }, 120_000);
+}
+
+export function getCandidateBatch(batchId: string): Promise<CandidateBatch> {
+  return request<CandidateBatch>(`/images/batches/${batchId}`, undefined, 20_000);
+}
+
+/** One stored reference image as raw PNG bytes, for showing it to the user. */
+export function downloadImage(imageId: string): Promise<Uint8Array> {
+  return fetchPng(`/images/${imageId}`);
 }
 
 export function previewJob(

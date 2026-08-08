@@ -26,10 +26,25 @@
 
         <section class="panel">
           <h2>New part</h2>
+
+          <label class="field">
+            <span>Prompt</span>
+            <textarea id="prompt" rows="2" spellcheck="false"
+              placeholder="a weathered wooden crate"></textarea>
+          </label>
+          <button id="generate-ideas" type="button" disabled>Generate 4 ideas</button>
+
+          <div id="ideas-head" class="ideas-head" hidden>
+            <p id="ideas-status" class="detail"></p>
+            <button id="regenerate" class="ghost" type="button" title="New batch">Regenerate</button>
+          </div>
+          <div id="candidates" class="candidates" role="radiogroup"
+            aria-label="Reference candidates" hidden></div>
+
           <label id="drop" class="drop">
             <input id="image-input" type="file" accept="image/png,image/jpeg,image/webp" hidden />
             <img id="image-preview" alt="" hidden />
-            <span id="drop-label">Drop a reference image, or click to choose</span>
+            <span id="drop-label">…or drop a reference image</span>
           </label>
           <div class="grid-2">
             <label class="field">
@@ -45,7 +60,7 @@
             <span>Target faces</span>
             <input id="target-faces" type="number" value="8000" min="500" step="500" />
           </label>
-          <button id="generate" type="button" disabled>Generate</button>
+          <button id="generate" type="button" disabled>Generate model</button>
           <p id="submit-status" class="detail"></p>
         </section>
 

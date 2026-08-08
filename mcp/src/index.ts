@@ -58,6 +58,34 @@ function image(png: Uint8Array, caption: string) {
   };
 }
 
+/**
+ * Several images in one result, each labelled with the id that selects it.
+ *
+ * The label goes BEFORE its image so "the second one" and "the one with the
+ * horns" both resolve to an image_id without a second round trip. Without the
+ * labels the model has four pictures and no way to name any of them.
+ */
+function labelledImages(
+  intro: string,
+  items: { caption: string; png: Uint8Array }[],
+  outro: string,
+) {
+  const content: (
+    | { type: "text"; text: string }
+    | { type: "image"; data: string; mimeType: string }
+  )[] = [{ type: "text" as const, text: intro }];
+  for (const item of items) {
+    content.push({ type: "text" as const, text: item.caption });
+    content.push({
+      type: "image" as const,
+      data: Buffer.from(item.png).toString("base64"),
+      mimeType: "image/png",
+    });
+  }
+  content.push({ type: "text" as const, text: outro });
+  return { content };
+}
+
 const PREVIEW_VIEWS = [
   "side",
   "front",
@@ -130,6 +158,289 @@ server.registerTool(
   },
 );
 
+// --------------------------------------------------------------------------
+// choosing the reference
+// --------------------------------------------------------------------------
+// The highest-leverage human moment in the pipeline. Image-to-3D is decided by
+// its reference — same generator, same settings, different picture, different
+// object — and until this existed a prompt produced one image and you took what
+// you got. See docs/REFERENCE-SELECTION.md.
+
+server.registerTool(
+  "generate_reference_options",
+  {
+    title: "Generate several reference images and let the USER pick one",
+    description:
+      "Generates N candidate reference images for one subject (4 by default) " +
+      "and returns ALL of them as images in this result, each labelled with " +
+      "its image_id. Concurrent, so four candidates take about as long as one " +
+      "— roughly 5-8 seconds — and cost four billed image calls.\n\n" +
+      "THE FLOW, and it has four steps, not three:\n" +
+      "1. Call this tool.\n" +
+      "2. SHOW the user the options. Describe each one in a sentence next to " +
+      "   its number so the pictures are usable even in a client that collapses " +
+      "   images behind an expander.\n" +
+      "3. ASK the user which one they want, and WAIT for the answer. If the " +
+      "   client supports it, choose_reference pops a picker; otherwise just " +
+      "   ask in chat and map their answer ('the second one', 'the one with " +
+      "   the horns') back to an image_id from the labels.\n" +
+      "4. Pass that image_id to generate_part.\n\n" +
+      "DO NOT PICK FOR THE USER when the user is there to ask. That is the " +
+      "entire point of this tool: the reference decides the mesh, and choosing " +
+      "it is the one judgement call in the pipeline a human is better at than " +
+      "you are. Picking silently and reporting a finished mesh throws the " +
+      "feature away. Choose yourself only when explicitly told to run " +
+      "unattended, and say that you did.\n\n" +
+      "SUPPLY `variants` — this is the mode that works. You know what 'a " +
+      "treasure chest' could be: a barnacled sunken strongbox, a gilded " +
+      "rococo casket, a plain banded pine box, a stone sarcophagus. Four " +
+      "genuinely different interpretations beat four re-rolls of one. Leave " +
+      "variants out and the server falls back to a fixed list of surface and " +
+      "camera modifiers (weathered / ornate / stylised / sleek / rugged), " +
+      "which varies the picture but cannot vary the IDEA, because it does not " +
+      "know what the subject is.\n\n" +
+      "Write variants by the same rules as any Kitbash prompt: describe the " +
+      "object's shape and materials, never the larger thing it belongs to. " +
+      "For one part of a multi-part build, name the geometry, not the part " +
+      "('a hollow tapered shell with six oval portholes', not 'a fuselage').",
+    inputSchema: {
+      prompt: z
+        .string()
+        .describe(
+          "The subject, e.g. 'an ornate treasure chest'. Kept as the batch's " +
+            "label even when variants replace it per candidate.",
+        ),
+      count: z
+        .number()
+        .int()
+        .min(1)
+        .max(8)
+        .optional()
+        .describe("How many candidates. Default 4. Each one is a billed image call."),
+      variants: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "One full prompt per candidate — the mode that gives the best " +
+            "results. Four different ideas, not four rewordings of one. If " +
+            "you give fewer than `count` they cycle, at different seeds.",
+        ),
+      seed: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          "Base seed; candidate i uses seed+i. Set it to make a batch " +
+            "reproducible, leave it out for a fresh spread.",
+        ),
+      image_size: z.string().optional().describe("Default 'square_hd'."),
+      remove_background: z
+        .boolean()
+        .optional()
+        .describe(
+          "Cut the subject out to a real alpha matte. Default true, and worth " +
+            "keeping: a white background baked into RGB gets reconstructed as " +
+            "geometry.",
+        ),
+    },
+  },
+  async (args) => {
+    try {
+      const batch = await api.generateCandidates({
+        prompt: args.prompt,
+        count: args.count,
+        variants: args.variants ? [...args.variants] : undefined,
+        seed: args.seed,
+        image_size: args.image_size,
+        remove_background: args.remove_background,
+      });
+
+      const pngs = await Promise.all(
+        batch.candidates.map((c) => api.downloadImage(c.image_id)),
+      );
+      const items = batch.candidates.map((c, i) => ({
+        png: pngs[i],
+        caption:
+          `Option ${i + 1} — image_id: ${c.image_id}` +
+          (c.variant ? ` — ${c.variant}` : " — as prompted, no modifier") +
+          `\nprompt: ${c.prompt}\nseed: ${c.seed}`,
+      }));
+
+      const failed = batch.failed.length
+        ? `\n\n${batch.failed.length} candidate(s) failed and are not shown: ` +
+          batch.failed.map((f) => f.error).join("; ")
+        : "";
+
+      return labelledImages(
+        `${batch.count} reference options for "${batch.prompt}" — ` +
+          `${batch.count} billed ${batch.provider} image calls, ` +
+          `${batch.elapsed_seconds}s wall (generated concurrently). ` +
+          `Batch ${batch.batch_id}, ${batch.mode} variation.` +
+          (batch.mode === "mechanical"
+            ? " Supply `variants` next time for genuinely different ideas."
+            : "") +
+          failed,
+        items,
+        `Now SHOW these to the user and ASK which one to build. Describe each ` +
+          `option in a sentence — silhouette, material, how much fine detail ` +
+          `it carries — so the choice is usable even if the images are ` +
+          `collapsed in their client. Do not choose for them.\n\n` +
+          `If choose_reference reports that this client supports elicitation, ` +
+          `call it with batch_id ${batch.batch_id} to pop a picker. Otherwise ` +
+          `ask in chat.\n\n` +
+          `Once they answer, pass the chosen image_id to generate_part as ` +
+          `image_id. Two things worth telling them if they ask which is the ` +
+          `better 3D reference: a true three-quarter view that shows depth ` +
+          `reconstructs far better than a flat head-on shot, and fine surface ` +
+          `relief does not survive to the mesh — a heavily carved option and a ` +
+          `plain one often produce a similar shape.\n\n` +
+          `To re-show this batch later, call get_reference_options with ` +
+          `batch_id ${batch.batch_id}. Nothing is spent until generate_part ` +
+          `runs, so there is no cost to leaving the question open.`,
+      );
+    } catch (err) {
+      return failure(err instanceof Error ? err.message : String(err));
+    }
+  },
+);
+
+server.registerTool(
+  "get_reference_options",
+  {
+    title: "Show a candidate batch again",
+    description:
+      "Re-displays the candidates from an earlier generate_reference_options " +
+      "batch, as images, without regenerating (and therefore without paying " +
+      "for) anything. Use it when the conversation moved on and the user " +
+      "wants another look, or when a previous session left a batch unchosen.",
+    inputSchema: {
+      batch_id: z.string().describe("From generate_reference_options."),
+    },
+  },
+  async ({ batch_id }) => {
+    try {
+      const batch = await api.getCandidateBatch(batch_id);
+      const pngs = await Promise.all(
+        batch.candidates.map((c) => api.downloadImage(c.image_id)),
+      );
+      return labelledImages(
+        `Batch ${batch.batch_id} — ${batch.count} options for ` +
+          `"${batch.prompt}". Already generated; nothing was billed for this.`,
+        batch.candidates.map((c, i) => ({
+          png: pngs[i],
+          caption:
+            `Option ${i + 1} — image_id: ${c.image_id}` +
+            (c.variant ? ` — ${c.variant}` : " — as prompted, no modifier") +
+            `\nprompt: ${c.prompt}`,
+        })),
+        "Ask the user which one to build, then pass its image_id to " +
+          "generate_part.",
+      );
+    } catch (err) {
+      return failure(err instanceof Error ? err.message : String(err));
+    }
+  },
+);
+
+server.registerTool(
+  "choose_reference",
+  {
+    title: "Ask the user to pick a reference, in a picker",
+    description:
+      "Puts the candidates from a batch in front of the user as a list they " +
+      "select from, and returns the image_id they chose. Uses MCP " +
+      "elicitation, which not every client implements — if this one does not, " +
+      "the tool says so and you should simply ask in chat instead. The " +
+      "image-content flow from generate_reference_options needs no protocol " +
+      "support and always works.\n\n" +
+      "Call generate_reference_options FIRST and show the images. This is a " +
+      "picker, not a gallery: it lists labels, so the user needs to have seen " +
+      "the pictures already for the labels to mean anything.\n\n" +
+      "Whatever comes back is the user's answer. Do not override it.",
+    inputSchema: {
+      batch_id: z.string().describe("From generate_reference_options."),
+      question: z
+        .string()
+        .optional()
+        .describe("Overrides the default prompt shown above the list."),
+    },
+  },
+  async ({ batch_id, question }) => {
+    try {
+      const batch = await api.getCandidateBatch(batch_id);
+
+      // Capability, not version: elicitation is negotiated at connect time, so
+      // asking the connection is the only answer that is true for this client.
+      const capabilities = server.server.getClientCapabilities();
+      if (!capabilities?.elicitation) {
+        return json({
+          supported: false,
+          batch_id,
+          options: batch.candidates.map((c, i) => ({
+            option: i + 1,
+            image_id: c.image_id,
+            variant: c.variant,
+            prompt: c.prompt,
+          })),
+          what_to_do:
+            "This client did not declare the elicitation capability, so there " +
+            "is no picker to show. Ask the user in chat which option they " +
+            "want — the images are already in the transcript from " +
+            "generate_reference_options — and map their answer to an " +
+            "image_id from the list above. Do not choose for them.",
+        });
+      }
+
+      const result = await server.server.elicitInput({
+        message:
+          question ??
+          `Which reference should Kitbash build "${batch.prompt}" from? ` +
+            `The pictures are in the previous tool result.`,
+        requestedSchema: {
+          type: "object",
+          properties: {
+            image_id: {
+              type: "string",
+              title: "Reference image",
+              description: "Option numbers match the images shown above.",
+              enum: batch.candidates.map((c) => c.image_id),
+              enumNames: batch.candidates.map(
+                (c, i) => `Option ${i + 1} — ${c.variant ?? "as prompted"}`,
+              ),
+            },
+          },
+          required: ["image_id"],
+        },
+      });
+
+      if (result.action !== "accept" || !result.content?.image_id) {
+        return json({
+          supported: true,
+          chosen: null,
+          action: result.action,
+          what_to_do:
+            "The user did not pick. Do not choose one yourself — ask them " +
+            "what they would rather have, or offer to generate a different " +
+            "set of options.",
+        });
+      }
+
+      const chosen = String(result.content.image_id);
+      const index = batch.candidates.findIndex((c) => c.image_id === chosen);
+      return json({
+        supported: true,
+        chosen_image_id: chosen,
+        option: index + 1,
+        variant: batch.candidates[index]?.variant ?? null,
+        prompt: batch.candidates[index]?.prompt ?? batch.prompt,
+        next: `Pass image_id ${chosen} to generate_part.`,
+      });
+    } catch (err) {
+      return failure(err instanceof Error ? err.message : String(err));
+    }
+  },
+);
+
 server.registerTool(
   "generate_part",
   {
@@ -140,10 +451,24 @@ server.registerTool(
       "loaded, plus about 70 seconds more on the very first call while weights " +
       "load.\n\n" +
       "Generates geometry only — the mesh has no textures or materials.\n\n" +
+      "THE REFERENCE DECIDES THE MESH. Same generator, same settings, a " +
+      "different picture and you get a different object — so if the reference " +
+      "is one image the model happened to produce from one prompt, nobody " +
+      "chose it. Call generate_reference_options first, show the user the " +
+      "candidates, let them pick, and pass the winner here as image_id.\n\n" +
       "For a multi-part object, call this once per part with the same seed and " +
       "a distinct part_name, so parts can be regenerated individually later " +
       "without rerolling the whole object.",
     inputSchema: {
+      image_id: z
+        .string()
+        .optional()
+        .describe(
+          "A reference already on the server — from " +
+            "generate_reference_options, and the preferred input. The image " +
+            "never travels through this conversation, so a chosen candidate " +
+            "costs nothing to hand on.",
+        ),
       image_path: z
         .string()
         .optional()
@@ -223,17 +548,25 @@ server.registerTool(
   },
   async (args, extra) => {
     try {
+      // The server takes exactly one of image_id or image_b64, so resolve the
+      // three inputs down to one here rather than letting it 400.
       let imageB64 = args.image_b64;
-      if (!imageB64) {
+      if (!args.image_id && !imageB64) {
         if (!args.image_path) {
-          return failure("Provide either image_path or image_b64.");
+          return failure("Provide one of image_id, image_path or image_b64.");
         }
         const bytes = await readFile(resolve(args.image_path)).catch(() => null);
         if (!bytes) return failure(`Could not read image: ${args.image_path}`);
         imageB64 = bytes.toString("base64");
       }
+      if (args.image_id && imageB64) {
+        return failure(
+          "Give one reference, not two: image_id, or image_path/image_b64.",
+        );
+      }
 
       const job = await api.submitJob({
+        image_id: args.image_id,
         image_b64: imageB64,
         part_name: args.part_name,
         seed: args.seed,
@@ -290,6 +623,7 @@ server.registerTool(
       return json({
         job_id: finished.id,
         part_name: args.part_name ?? null,
+        image_id: args.image_id ?? null,
         output_path: out,
         faces: r.faces,
         vertices: r.vertices,

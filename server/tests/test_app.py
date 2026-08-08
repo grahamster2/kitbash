@@ -556,6 +556,123 @@ def test_get_image_404s_for_an_unknown_id(client):
     assert client.get("/images/nosuchimage").status_code == 404
 
 
+@pytest.fixture
+def fake_fal(monkeypatch):
+    """A fal provider that returns a real PNG without touching the network."""
+    import imagegen
+
+    monkeypatch.setattr(imagegen.FalProvider, "available", lambda self: True)
+    monkeypatch.setattr(
+        imagegen.FalProvider, "generate", lambda self, prompt, **kw: PNG_BYTES
+    )
+    return imagegen
+
+
+def test_post_image_candidates_returns_every_candidate_unchosen(client, fake_fal):
+    """The choice is the point: the server never picks one."""
+    body = client.post(
+        "/images/candidates",
+        json={"prompt": "a treasure chest", "count": 4,
+              "remove_background": False},
+    ).json()
+
+    assert body["prompt"] == "a treasure chest"
+    assert len(body["candidates"]) == 4
+    for candidate in body["candidates"]:
+        assert set(candidate) >= {"image_id", "prompt", "variant", "seed",
+                                  "bytes", "path"}
+        assert client.get(f"/images/{candidate['image_id']}").status_code == 200
+
+
+def test_post_image_candidates_reports_what_it_spent(client, fake_fal):
+    body = client.post(
+        "/images/candidates",
+        json={"prompt": "a crate", "count": 3, "remove_background": False},
+    ).json()
+
+    # Three images is three billed calls; nobody should learn that from a bill.
+    assert body["count"] == 3
+    assert "elapsed_seconds" in body
+
+
+def test_post_image_candidates_defaults_to_four(client, fake_fal):
+    body = client.post(
+        "/images/candidates",
+        json={"prompt": "a crate", "remove_background": False},
+    ).json()
+
+    assert len(body["candidates"]) == 4
+
+
+def test_post_image_candidates_takes_caller_supplied_variants(client, fake_fal):
+    variants = ["a plain pine chest", "a gilded rococo chest"]
+
+    body = client.post(
+        "/images/candidates",
+        json={"prompt": "a chest", "count": 2, "variants": variants,
+              "remove_background": False},
+    ).json()
+
+    assert [c["prompt"] for c in body["candidates"]] == variants
+    assert body["mode"] == "variants"
+
+
+def test_post_image_candidates_caps_the_count(client, fake_fal):
+    import imagegen
+
+    response = client.post(
+        "/images/candidates",
+        json={"prompt": "a crate", "count": imagegen.MAX_CANDIDATES + 1},
+    )
+
+    assert response.status_code == 422
+
+
+def test_post_image_candidates_surfaces_a_provider_failure_as_502(client, monkeypatch):
+    import imagegen
+
+    def boom(self, prompt, **kw):
+        raise imagegen.ImageGenError("fal.ai rejected the API key (401)")
+
+    monkeypatch.setattr(imagegen.FalProvider, "available", lambda self: True)
+    monkeypatch.setattr(imagegen.FalProvider, "generate", boom)
+
+    response = client.post("/images/candidates", json={"prompt": "a crate"})
+
+    assert response.status_code == 502
+    assert "API key" in response.json()["detail"]
+
+
+def test_a_batch_can_be_fetched_again_for_re_display(client, fake_fal):
+    created = client.post(
+        "/images/candidates",
+        json={"prompt": "a crate", "count": 2, "remove_background": False},
+    ).json()
+
+    fetched = client.get(f"/images/batches/{created['batch_id']}")
+
+    assert fetched.status_code == 200
+    assert fetched.json() == created
+
+
+def test_an_unknown_batch_404s(client):
+    assert client.get("/images/batches/nosuchbatch").status_code == 404
+
+
+def test_a_chosen_candidate_goes_straight_into_a_job(client, fake_fal):
+    """The whole loop: generate options, choose one, generate from it."""
+    batch = client.post(
+        "/images/candidates",
+        json={"prompt": "a crate", "count": 2, "remove_background": False},
+    ).json()
+    chosen = batch["candidates"][1]["image_id"]
+
+    job = client.post("/jobs", json={"image_id": chosen}).json()
+    jobs._run_one(job["id"])
+
+    assert jobs.get(job["id"])["status"] == jobs.DONE
+
+
 def test_get_primitives_lists_every_kind_with_its_parameters(client):
     body = client.get("/primitives").json()
 

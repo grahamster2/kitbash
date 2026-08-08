@@ -9,6 +9,12 @@ const els = {
   baseUrl: $<HTMLInputElement>("base-url"),
   serverStatus: $<HTMLSpanElement>("server-status"),
   serverDetail: $<HTMLParagraphElement>("server-detail"),
+  prompt: $<HTMLTextAreaElement>("prompt"),
+  generateIdeas: $<HTMLButtonElement>("generate-ideas"),
+  ideasHead: $<HTMLDivElement>("ideas-head"),
+  ideasStatus: $<HTMLParagraphElement>("ideas-status"),
+  regenerate: $<HTMLButtonElement>("regenerate"),
+  candidates: $<HTMLDivElement>("candidates"),
   imageInput: $<HTMLInputElement>("image-input"),
   imagePreview: $<HTMLImageElement>("image-preview"),
   dropLabel: $<HTMLSpanElement>("drop-label"),
@@ -56,10 +62,21 @@ interface DraftPart {
 }
 
 const DRAFT_KEY = "kitbash.draft";
+const IDEA_COUNT = 4;
+const DROP_LABEL = "…or drop a reference image";
+
+/**
+ * What the next mesh will be generated from. A dropped file travels as base64;
+ * a picked candidate is already on the server and travels as an id, so the
+ * bytes never make the round trip back up.
+ */
+type Reference =
+  | { kind: "file"; b64: string }
+  | { kind: "candidate"; imageId: string; prompt: string };
 
 let jobs: api.Job[] = [];
 let selectedId: string | null = null;
-let pendingImage: string | null = null;
+let reference: Reference | null = null;
 let watching: string | null = null;
 let draft: DraftPart[] = [];
 let nextKey = 1;
@@ -70,6 +87,14 @@ let isolated: string | null = null;
 const measured = new Map<string, api.Describe>();
 // Mesh downloads cross a network; a slow one must not clobber a newer click.
 let loadToken = 0;
+// Same guard for image batches: a regenerate must not be overwritten by the
+// thumbnails of the batch it replaced.
+let batchToken = 0;
+let batch: api.CandidateBatch | null = null;
+let picked: string | null = null;
+let ideasBusy = false;
+const tiles = new Map<string, HTMLButtonElement>();
+const thumbUrls = new Map<string, string>();
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const jobLabel = (j: api.Job) => (j.params.part_name as string) || j.id;
@@ -86,9 +111,12 @@ els.baseUrl.addEventListener("change", () => {
   els.baseUrl.value = api.setBaseUrl(els.baseUrl.value);
   jobs = [];
   selectedId = null;
-  // Job and scene ids belong to one server; nothing carries across a switch.
+  // Job, scene and image ids belong to one server; nothing carries across a switch.
   viewing = null;
   measured.clear();
+  batchToken++;
+  clearCandidates();
+  els.ideasHead.hidden = true;
   els.export.disabled = true;
   clearExport();
   renderJobs();
@@ -284,17 +312,311 @@ els.rotate.addEventListener("click", () => {
   viewport.setAutoRotate(on);
 });
 
+/* ---------- reference candidates ---------- */
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function setIdeasStatus(text: string, error = false) {
+  els.ideasHead.hidden = false;
+  els.ideasStatus.className = error ? "detail error" : "detail";
+  els.ideasStatus.textContent = text;
+}
+
+/**
+ * A batch, from whichever endpoint this server has.
+ *
+ * `/images/candidates` is the batch endpoint; a server that predates it only
+ * has the single-image POST. Four of those fanned out produce the same shape,
+ * so the picker works against either build without the user having to know
+ * which one is deployed — the fallback simply goes dormant once it is.
+ */
+async function fetchBatch(prompt: string, seed: number): Promise<api.CandidateBatch> {
+  try {
+    return await api.createCandidates({
+      prompt,
+      count: IDEA_COUNT,
+      remove_background: true,
+      seed,
+    });
+  } catch (e) {
+    // 405, not just 404: on a server without the batch route, `/images/candidates`
+    // still matches `GET /images/{image_id}`, so FastAPI rejects the method
+    // rather than the path.
+    if (!/\b40[45]\b/.test(errText(e))) throw e;
+    const singles = await Promise.all(
+      Array.from({ length: IDEA_COUNT }, (_, i) =>
+        api.createImage({ prompt, seed: seed + i, remove_background: true }),
+      ),
+    );
+    return {
+      batch_id: `local-${seed}`,
+      prompt,
+      candidates: singles.map((s, i) => ({
+        image_id: s.image_id,
+        prompt,
+        variant: null,
+        seed: seed + i,
+        bytes: s.bytes,
+        path: s.path,
+      })),
+    };
+  }
+}
+
+/**
+ * The POST is specified to return the whole batch. A server that answered early
+ * with a partial one would otherwise leave permanent placeholders on screen, so
+ * re-read the batch record until it is full or the wait stops being plausible.
+ */
+async function topUp(first: api.CandidateBatch, token: number): Promise<api.CandidateBatch> {
+  const deadline = Date.now() + 60_000;
+  let cur = first;
+  while (cur.candidates.length < IDEA_COUNT && Date.now() < deadline) {
+    await sleep(1000);
+    if (token !== batchToken) return cur;
+    try {
+      cur = await api.getBatch(cur.batch_id);
+    } catch {
+      return cur; // No batch record to poll; what arrived is what there is.
+    }
+    if (token !== batchToken) return cur;
+    showBatch(cur, token);
+  }
+  return cur;
+}
+
+async function generateIdeas() {
+  const prompt = els.prompt.value.trim();
+  if (!prompt || ideasBusy) return;
+
+  const token = ++batchToken;
+  ideasBusy = true;
+  els.generateIdeas.disabled = true;
+  els.regenerate.disabled = true;
+  clearCandidates();
+  // Placeholders before the request, not after it: the wait is exactly when the
+  // user needs to see that something is happening.
+  showPlaceholders();
+
+  const started = Date.now();
+  const elapsed = () => (Date.now() - started) / 1000;
+  setIdeasStatus(`generating ${IDEA_COUNT} ideas… 0s`);
+  const tick = setInterval(
+    () => setIdeasStatus(`generating ${IDEA_COUNT} ideas… ${elapsed().toFixed(0)}s`),
+    250,
+  );
+
+  try {
+    // An explicit random base seed rather than none, so a regenerate is
+    // guaranteed to differ instead of depending on how the provider seeds.
+    const seed = Math.floor(Math.random() * 2 ** 31);
+    const first = await fetchBatch(prompt, seed);
+    if (token !== batchToken) return;
+    showBatch(first, token);
+    const full = await topUp(first, token);
+    if (token !== batchToken) return;
+    setIdeasStatus(
+      `${full.candidates.length} ideas in ${elapsed().toFixed(1)}s — pick one`,
+    );
+  } catch (e) {
+    if (token !== batchToken) return;
+    clearCandidates();
+    setIdeasStatus(errText(e), true);
+  } finally {
+    clearInterval(tick);
+    if (token === batchToken) {
+      ideasBusy = false;
+      els.generateIdeas.disabled = !els.prompt.value.trim();
+      els.regenerate.disabled = false;
+    }
+  }
+}
+
+function showPlaceholders() {
+  els.candidates.hidden = false;
+  els.candidates.replaceChildren(
+    ...Array.from({ length: IDEA_COUNT }, () => placeholder()),
+  );
+}
+
+function placeholder(): HTMLDivElement {
+  const div = document.createElement("div");
+  div.className = "candidate loading";
+  return div;
+}
+
+function showBatch(next: api.CandidateBatch, token: number) {
+  batch = next;
+  els.candidates.hidden = false;
+  const cells: HTMLElement[] = next.candidates.map((c, i) => tileFor(c, i, token));
+  while (cells.length < IDEA_COUNT) cells.push(placeholder());
+  els.candidates.replaceChildren(...cells);
+  markPicked();
+}
+
+/** Tiles are cached by image id so a top-up poll does not refetch a thumbnail. */
+function tileFor(c: api.Candidate, index: number, token: number): HTMLButtonElement {
+  const cached = tiles.get(c.image_id);
+  if (cached) return cached;
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "candidate loading";
+  btn.setAttribute("role", "radio");
+  btn.setAttribute("aria-checked", "false");
+  btn.setAttribute("aria-label", c.variant ?? `idea ${index + 1}`);
+  btn.title = `${c.variant ? `${c.variant} · ` : ""}seed ${c.seed} · press ${index + 1}`;
+  btn.tabIndex = index === 0 ? 0 : -1;
+  if (c.variant) {
+    const tag = document.createElement("span");
+    tag.className = "tag";
+    tag.textContent = c.variant;
+    btn.append(tag);
+  }
+  btn.addEventListener("click", () => pick(c.image_id));
+  tiles.set(c.image_id, btn);
+  void loadThumb(c, btn, token);
+  return btn;
+}
+
+async function loadThumb(c: api.Candidate, btn: HTMLButtonElement, token: number) {
+  try {
+    const png = await api.fetchImage(c.image_id);
+    if (token !== batchToken) return;
+    // A blob URL keeps a megapixel of base64 out of the DOM, and the app's CSP
+    // already allows blob: for images.
+    const url = URL.createObjectURL(new Blob([png], { type: "image/png" }));
+    thumbUrls.set(c.image_id, url);
+    const img = document.createElement("img");
+    img.alt = c.variant ?? c.prompt;
+    img.src = url;
+    // Prepend so the variant tag and tick stay painted over the image.
+    btn.prepend(img);
+    btn.classList.remove("loading");
+  } catch (e) {
+    if (token !== batchToken) return;
+    btn.classList.remove("loading");
+    btn.classList.add("failed");
+    btn.textContent = "failed";
+    btn.title = errText(e);
+  }
+}
+
+function clearCandidates() {
+  for (const url of thumbUrls.values()) URL.revokeObjectURL(url);
+  thumbUrls.clear();
+  tiles.clear();
+  batch = null;
+  picked = null;
+  els.candidates.replaceChildren();
+  els.candidates.hidden = true;
+  els.candidates.classList.remove("picked");
+  // A stale pick must not survive into the next batch.
+  if (reference?.kind === "candidate") reference = null;
+  updateGenerate();
+}
+
+function pick(imageId: string) {
+  const c = batch?.candidates.find((x) => x.image_id === imageId);
+  if (!c) return;
+  picked = imageId;
+  reference = { kind: "candidate", imageId, prompt: c.prompt };
+  // One reference at a time — picking replaces whatever file was dropped.
+  els.imagePreview.hidden = true;
+  els.imagePreview.removeAttribute("src");
+  els.dropLabel.textContent = DROP_LABEL;
+  markPicked();
+  updateGenerate();
+  // The grid is tall enough to push the next step off the bottom of the column
+  // on a short window; having picked, the user is looking for that button.
+  els.generate.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+function markPicked() {
+  els.candidates.classList.toggle("picked", picked !== null);
+  let index = 0;
+  for (const [id, btn] of tiles) {
+    const on = id === picked;
+    btn.classList.toggle("on", on);
+    btn.setAttribute("aria-checked", String(on));
+    // Roving tabindex: one stop for the whole group, landing on the pick.
+    btn.tabIndex = on || (picked === null && index === 0) ? 0 : -1;
+    btn.querySelector(".tick")?.remove();
+    if (on) {
+      const tick = document.createElement("span");
+      tick.className = "tick";
+      tick.textContent = "✓";
+      btn.append(tick);
+    }
+    index++;
+  }
+}
+
+const ARROW_STEP: Record<string, number> = {
+  ArrowRight: 1,
+  ArrowLeft: -1,
+  ArrowDown: 2,
+  ArrowUp: -2,
+};
+
+els.candidates.addEventListener("keydown", (e) => {
+  const step = ARROW_STEP[e.key];
+  if (step === undefined) return;
+  const ids = batch?.candidates.map((c) => c.image_id) ?? [];
+  if (!ids.length) return;
+  e.preventDefault();
+  const from = picked ? ids.indexOf(picked) : 0;
+  focusPick(ids[Math.min(ids.length - 1, Math.max(0, from + step))]);
+});
+
+// 1-4 picks without reaching for the mouse, but only when the keystroke is not
+// already meant for a field.
+document.addEventListener("keydown", (e) => {
+  if (e.target instanceof HTMLElement && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+  const n = Number(e.key);
+  if (!Number.isInteger(n) || n < 1 || n > IDEA_COUNT) return;
+  const c = batch?.candidates[n - 1];
+  if (c) focusPick(c.image_id);
+});
+
+function focusPick(imageId: string) {
+  pick(imageId);
+  tiles.get(imageId)?.focus();
+}
+
+els.prompt.addEventListener("input", () => {
+  els.generateIdeas.disabled = ideasBusy || !els.prompt.value.trim();
+});
+
+// Enter submits the prompt; Shift+Enter is still a newline.
+els.prompt.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    void generateIdeas();
+  }
+});
+
+els.generateIdeas.addEventListener("click", () => void generateIdeas());
+els.regenerate.addEventListener("click", () => void generateIdeas());
+
 /* ---------- submission ---------- */
+
+function updateGenerate() {
+  els.generate.disabled = reference === null || watching !== null;
+}
 
 function useImage(file: File) {
   const reader = new FileReader();
   reader.onload = () => {
     const dataUrl = reader.result as string;
-    pendingImage = dataUrl.slice(dataUrl.indexOf(",") + 1);
+    reference = { kind: "file", b64: dataUrl.slice(dataUrl.indexOf(",") + 1) };
     els.imagePreview.src = dataUrl;
     els.imagePreview.hidden = false;
     els.dropLabel.textContent = file.name;
-    els.generate.disabled = watching !== null;
+    // A dropped file and a picked candidate are the same slot.
+    picked = null;
+    markPicked();
+    updateGenerate();
   };
   reader.readAsDataURL(file);
 }
@@ -314,8 +636,19 @@ drop.addEventListener("drop", (e) => {
 
 els.generate.addEventListener("click", () => void submit());
 
+/** Part names become glTF node names, so a prompt has to survive as an identifier. */
+function slug(text: string): string | undefined {
+  return (
+    text
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 40) || undefined
+  );
+}
+
 async function submit() {
-  if (!pendingImage) return;
+  if (!reference) return;
   els.generate.disabled = true;
   els.submitStatus.className = "detail";
   els.submitStatus.textContent = "submitting…";
@@ -324,8 +657,14 @@ async function submit() {
   const faces = Number.parseInt(els.targetFaces.value, 10);
   try {
     const job = await api.submitJob({
-      image_b64: pendingImage,
-      part_name: els.partName.value.trim() || undefined,
+      // A picked candidate already lives on the server, so it goes by id — the
+      // same reference can then drive several parts of one object.
+      ...(reference.kind === "candidate"
+        ? { image_id: reference.imageId }
+        : { image_b64: reference.b64 }),
+      part_name:
+        els.partName.value.trim() ||
+        (reference.kind === "candidate" ? slug(reference.prompt) : undefined),
       seed: Number.isFinite(seed) ? seed : undefined,
       target_faces: Number.isFinite(faces) ? faces : undefined,
     });
@@ -335,7 +674,7 @@ async function submit() {
   } catch (e) {
     els.submitStatus.className = "detail error";
     els.submitStatus.textContent = errText(e);
-    els.generate.disabled = false;
+    updateGenerate();
   }
 }
 
@@ -348,18 +687,28 @@ async function pollWatched() {
       els.submitStatus.textContent = `${job.id} done in ${job.result?.generation_seconds.toFixed(0)}s`;
       const id = job.id;
       watching = null;
-      els.generate.disabled = !pendingImage;
+      updateGenerate();
       await refreshJobs();
       await selectJob(id);
     } else if (job.status === "error") {
       els.submitStatus.className = "detail error";
       els.submitStatus.textContent = job.error ?? "generation failed";
       watching = null;
-      els.generate.disabled = !pendingImage;
+      updateGenerate();
     } else {
       const since = job.started_at ?? job.created_at;
       const secs = Math.max(0, Math.round(Date.now() / 1000 - since));
-      els.submitStatus.textContent = `${job.id} ${job.status} · ${secs}s`;
+      // Say what the wait is worth up front — a mesh is 30-60s of GPU time and
+      // a silent counter at 25s reads like a hang. Past a minute the honest
+      // answer is different: the first job of a session also loads the weights,
+      // measured at ~85s wall against 40s of actual generation.
+      const hint =
+        job.status !== "running"
+          ? ""
+          : secs < 60
+            ? " · usually 30–60s"
+            : " · the first job also loads the model";
+      els.submitStatus.textContent = `${job.id} ${job.status} · ${secs}s${hint}`;
     }
   } catch (e) {
     els.submitStatus.className = "detail error";

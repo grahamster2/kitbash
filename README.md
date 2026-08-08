@@ -115,6 +115,7 @@ The server URL is a field in the UI and is remembered; it seeds from `KITBASH_SE
 | [STRATEGY.md](docs/STRATEGY.md) | The decision layer: single vs hybrid vs scripted, the archetype taxonomy, the triangle budget, and what a build costs before it runs |
 | [WHAT-GENERATION-IS-FOR.md](docs/WHAT-GENERATION-IS-FOR.md) | Ten organic and ornate subjects measured against a scripted control — where the generator wins and where it loses |
 | [SHOWCASE-CHEST.md](docs/SHOWCASE-CHEST.md) | One asset end to end — 84 parts, generated and scripted, hollow, openable, Roblox-ready |
+| [REFERENCE-SELECTION.md](docs/REFERENCE-SELECTION.md) | Four candidate references per prompt, and why the human picking one is the highest-leverage moment in the pipeline |
 | [DECIMATION.md](docs/DECIMATION.md) | How far a mesh reduces before it shows, with renders |
 | [MULTI-PART.md](docs/MULTI-PART.md) | Part decomposition, placement, coordinate conventions |
 | [ROBLOX-EXPORT.md](docs/ROBLOX-EXPORT.md) | Roblox's real import constraints, with sources |

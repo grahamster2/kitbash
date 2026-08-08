@@ -47,11 +47,48 @@ export interface Health {
   running: string[];
 }
 
+/** Exactly one of `image_b64` / `image_id` — a dropped file or a picked candidate. */
 export interface SubmitBody {
-  image_b64: string;
+  image_b64?: string;
+  image_id?: string;
   part_name?: string;
   seed?: number;
   target_faces?: number;
+  generator?: string;
+  textured?: boolean;
+}
+
+/** One idea in a batch. `variant` is the server's angle on the prompt, if any. */
+export interface Candidate {
+  image_id: string;
+  prompt: string;
+  variant: string | null;
+  seed: number;
+  bytes: number;
+  path: string;
+}
+
+export interface CandidateBatch {
+  batch_id: string;
+  prompt: string;
+  candidates: Candidate[];
+}
+
+export interface CandidatesBody {
+  prompt: string;
+  count: number;
+  variants?: string[] | null;
+  image_size?: string | null;
+  seed?: number | null;
+  remove_background: boolean;
+}
+
+export interface SingleImage {
+  image_id: string;
+  path: string;
+  provider: string;
+  prompt: string;
+  bytes: number;
 }
 
 export type Vec3 = [number, number, number];
@@ -148,6 +185,19 @@ export const submitJob = (body: SubmitBody) =>
 export const describeJob = (id: string) =>
   invoke<Describe>("describe_job", { baseUrl, id });
 
+export const createCandidates = (body: CandidatesBody) =>
+  invoke<CandidateBatch>("create_candidates", { baseUrl, body });
+
+export const getBatch = (id: string) =>
+  invoke<CandidateBatch>("get_batch", { baseUrl, id });
+
+export const createImage = (body: {
+  prompt: string;
+  seed?: number;
+  image_size?: string;
+  remove_background: boolean;
+}) => invoke<SingleImage>("create_image", { baseUrl, body });
+
 export const assemble = (parts: ScenePart[], sceneName?: string) =>
   invoke<Scene>("assemble", { baseUrl, body: { parts, scene_name: sceneName } });
 
@@ -170,3 +220,5 @@ async function bytes(cmd: string, id: string): Promise<ArrayBuffer> {
 
 export const fetchMesh = (id: string) => bytes("fetch_mesh", id);
 export const fetchScene = (id: string) => bytes("fetch_scene", id);
+/** PNG bytes for a candidate — the caller wraps them in a blob URL. */
+export const fetchImage = (id: string) => bytes("fetch_image", id);
