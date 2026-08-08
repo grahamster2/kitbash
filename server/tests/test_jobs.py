@@ -5,6 +5,7 @@ import json
 import pytest
 
 import config
+import numpy as np
 import jobs
 import pipeline
 from conftest import wait_for, write_job_json
@@ -341,3 +342,59 @@ def test_start_worker_does_not_start_a_second_thread():
     jobs.start_worker()
 
     assert jobs._worker is first and first.is_alive()
+
+
+def test_a_lone_part_is_oriented_when_the_caller_declares_a_frame(monkeypatch):
+    """A part generated on its own never reaches /assemble, so without this a
+    skull ships lying on whichever side its reference implied."""
+    seen = {}
+
+    import orient as orienting
+
+    def fake_orient(mesh, spec):
+        seen["spec"] = spec
+        return orienting.Orientation(
+            rotation=[90.0, 0.0, 0.0], matrix=np.eye(3), confidence=0.9,
+            extents=[1, 2, 3], declared=[1, 2, 3], asymmetry=[0, 0, 0],
+            degrees=90.0,
+        )
+
+    monkeypatch.setattr(orienting, "orient", fake_orient)
+    job = jobs.submit("image_to_3d", {"orient": "skull"}, IMAGE)
+
+    jobs._run_one(job["id"])
+
+    done = jobs.get(job["id"])
+    assert done["status"] == jobs.DONE
+    assert seen["spec"] == "skull"
+    assert done["result"]["oriented"]["degrees"] == 90.0
+
+
+def test_a_failed_orient_keeps_the_mesh_rather_than_failing_the_job(monkeypatch):
+    """An unusable orientation is worse than an unoriented mesh."""
+    import orient as orienting
+
+    def boom(mesh, spec):
+        raise RuntimeError("no confident reading")
+
+    monkeypatch.setattr(orienting, "orient", boom)
+    job = jobs.submit("image_to_3d", {"orient": "skull"}, IMAGE)
+
+    jobs._run_one(job["id"])
+
+    done = jobs.get(job["id"])
+    assert done["status"] == jobs.DONE
+    assert done["result"]["oriented"] is None
+
+
+def test_a_part_without_a_declared_frame_is_left_alone(monkeypatch):
+    import orient as orienting
+
+    monkeypatch.setattr(
+        orienting, "orient", lambda *a, **k: pytest.fail("should not orient")
+    )
+    job = jobs.submit("image_to_3d", {}, IMAGE)
+
+    jobs._run_one(job["id"])
+
+    assert "oriented" not in jobs.get(job["id"])["result"]

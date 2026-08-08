@@ -86,6 +86,16 @@ class GenerateRequest(BaseModel):
     # Defaults on wherever the generator supplies no colour of its own.
     texture: bool | None = None
     texture_mode: str | None = Field(None, description='"uv", "atlas" or "vertex"')
+    orient: object | None = Field(
+        None,
+        description=(
+            "Rotate the finished mesh into a declared frame — a role name from "
+            "GET /orient/roles, [x, y, z] target extents, or an object. "
+            "Generated parts arrive at an arbitrary heading, and a part built "
+            "on its own never reaches /assemble, so without this a lone skull "
+            "ships lying on its side."
+        ),
+    )
     # Free-form label so a caller can tag which part of a multi-part build this
     # is. The server does not interpret it.
     part_name: str | None = None
@@ -177,6 +187,7 @@ def create_job(req: GenerateRequest):
             "target_faces": req.target_faces,
             "texture": req.texture,
             "texture_mode": req.texture_mode,
+            "orient": req.orient,
             "part_name": req.part_name,
             "generator": req.generator,
             "textured": req.textured,

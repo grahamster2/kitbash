@@ -149,6 +149,11 @@ def _run_one(job_id: str):
         # Paint here rather than in a later call: back-projection needs the
         # reference image, and the image is deliberately dropped the moment the
         # job ends so it never reaches disk or an API response.
+        # Orient before painting: back-projection fits a camera to the mesh, so
+        # rotating afterwards would leave the atlas fitted to the old pose.
+        if job["params"].get("orient"):
+            result = _orient_result(result, job["params"]["orient"])
+
         if _wants_texture(job["params"], result):
             result = _back_project(image_b64, result, job["params"])
 
@@ -161,6 +166,45 @@ def _run_one(job_id: str):
     finally:
         with _jobs_lock:
             _images.pop(job_id, None)
+
+
+def _orient_result(result: dict, spec) -> dict:
+    """Rotate a finished mesh into the frame its caller declared.
+
+    Generated parts arrive at an arbitrary heading — measured at 318 degrees on
+    one subject and 174 on another — and assemble.py can already fix that for a
+    part it is placing. A part generated on its own never reaches assemble, so
+    a lone skull shipped lying on its side. This is the same orient, applied
+    one part earlier.
+
+    Never fails a job: an unusable orientation is worse than an unoriented mesh,
+    and the confidence is reported either way so a caller can judge.
+    """
+    import trimesh
+
+    import orient as orienting
+
+    mesh_path = Path(result["mesh_path"])
+    try:
+        import numpy as np
+
+        mesh = trimesh.load(str(mesh_path), force="mesh")
+        outcome = orienting.orient(mesh, spec)
+        # Orientation.matrix is the 3x3; apply_transform wants a homogeneous 4x4.
+        transform = np.eye(4)
+        transform[:3, :3] = outcome.matrix
+        mesh.apply_transform(transform)
+        mesh.export(str(mesh_path))
+        log.info("oriented %s: turned %.1f deg, confidence %.2f",
+                 mesh_path.parent.name, outcome.degrees, outcome.confidence)
+        return {
+            **result,
+            "oriented": {"spec": spec, **outcome.as_dict()},
+            "file_bytes": mesh_path.stat().st_size,
+        }
+    except Exception:
+        log.warning("orient failed; keeping the mesh as generated", exc_info=True)
+        return {**result, "oriented": None}
 
 
 def _wants_texture(params: dict, result: dict) -> bool:
