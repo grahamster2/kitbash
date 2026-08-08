@@ -1,7 +1,27 @@
+/**
+ * The Kitbash desktop app.
+ *
+ * The shape of this file follows the pipeline it drives, and the order matters:
+ *
+ *   say what you want  ->  POST /strategy   ->  see the plan  ->  build it
+ *
+ * `/strategy` is the decision layer. It reads a plain subject and loose prose
+ * about what the thing is *for*, and answers with one of three strategies, the
+ * measured evidence for it, what it will cost before a second of GPU is spent,
+ * and a draft plan in `/decompose` format that validates and can be run
+ * unchanged. There is no LLM behind it and no GPU: it answers in about a
+ * millisecond.
+ *
+ * That is why this app asks two questions and offers no technical knobs. The
+ * triangle budget is not a setting here — 20,000 is Roblox's per-MeshPart
+ * import cap and nothing else's, and `/strategy` derives it from the intent.
+ * Nobody asking for a guard tower knows how many triangles a guard tower
+ * should be, and being asked is the tell that the decision layer was skipped.
+ */
 import { save } from "@tauri-apps/plugin-dialog";
 
 import * as api from "./api";
-import { PartInfo, Viewport } from "./viewport";
+import { PartInfo, PartModes, Viewport } from "./viewport";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -9,6 +29,20 @@ const els = {
   baseUrl: $<HTMLInputElement>("base-url"),
   serverStatus: $<HTMLSpanElement>("server-status"),
   serverDetail: $<HTMLParagraphElement>("server-detail"),
+  subject: $<HTMLTextAreaElement>("subject"),
+  intent: $<HTMLTextAreaElement>("intent"),
+  plan: $<HTMLButtonElement>("plan"),
+  planStatus: $<HTMLParagraphElement>("plan-status"),
+  planPanel: $<HTMLElement>("plan-panel"),
+  planHeadline: $<HTMLParagraphElement>("plan-headline"),
+  planSub: $<HTMLParagraphElement>("plan-sub"),
+  planWhy: $<HTMLDivElement>("plan-why"),
+  planWarnings: $<HTMLDivElement>("plan-warnings"),
+  planParts: $<HTMLUListElement>("plan-parts"),
+  replan: $<HTMLButtonElement>("replan"),
+  build: $<HTMLButtonElement>("build"),
+  buildStatus: $<HTMLParagraphElement>("build-status"),
+  refPanel: $<HTMLElement>("ref-panel"),
   prompt: $<HTMLTextAreaElement>("prompt"),
   generateIdeas: $<HTMLButtonElement>("generate-ideas"),
   ideasHead: $<HTMLDivElement>("ideas-head"),
@@ -18,11 +52,6 @@ const els = {
   imageInput: $<HTMLInputElement>("image-input"),
   imagePreview: $<HTMLImageElement>("image-preview"),
   dropLabel: $<HTMLSpanElement>("drop-label"),
-  partName: $<HTMLInputElement>("part-name"),
-  seed: $<HTMLInputElement>("seed"),
-  targetFaces: $<HTMLInputElement>("target-faces"),
-  generate: $<HTMLButtonElement>("generate"),
-  submitStatus: $<HTMLParagraphElement>("submit-status"),
   refresh: $<HTMLButtonElement>("refresh"),
   jobList: $<HTMLUListElement>("job-list"),
   hudTitle: $<HTMLSpanElement>("hud-title"),
@@ -78,6 +107,11 @@ let jobs: api.Job[] = [];
 let selectedId: string | null = null;
 let reference: Reference | null = null;
 let watching: string | null = null;
+/** The current recommendation, and the draft plan it came with. */
+let rec: api.Recommendation | null = null;
+let building = false;
+/** How each part in view was built — the viewport needs it to light them. */
+let partModes: PartModes = new Map();
 let draft: DraftPart[] = [];
 let nextKey = 1;
 /** What the viewport is showing, and therefore what Export will act on. */
@@ -116,6 +150,7 @@ els.baseUrl.addEventListener("change", () => {
   measured.clear();
   batchToken++;
   clearCandidates();
+  clearPlan();
   els.ideasHead.hidden = true;
   els.export.disabled = true;
   clearExport();
@@ -217,21 +252,45 @@ function jobMeta(job: api.Job): string {
 
 /* ---------- viewport ---------- */
 
+/**
+ * How a job's mesh should be lit, from what built it. A generated part carries
+ * a back-projected photograph and must be shown unlit; a scripted one carries a
+ * PBR material and has to be lit to read at all. See viewport.ts.
+ */
+const modeOfJob = (job?: api.Job): api.PartMode =>
+  job?.type === "primitive" ? "script" : "generate";
+
 async function selectJob(id: string) {
   const job = jobs.find((j) => j.id === id);
   selectedId = id;
   renderJobs();
-  await show({ kind: "job", id, label: job ? jobLabel(job) : id }, () => api.fetchMesh(id));
+  const label = job ? jobLabel(job) : id;
+  await show({ kind: "job", id, label }, () => api.fetchMesh(id), new Map([[label, modeOfJob(job)]]));
 }
 
-async function showScene(scene: api.Scene) {
+async function showScene(scene: api.Scene, modes: PartModes, lightModes = modes) {
   selectedId = null;
   renderJobs();
   const label = scene.scene_path.split(/[\\/]/).pop() ?? scene.scene_id;
-  await show({ kind: "scene", id: scene.scene_id, label }, () => api.fetchScene(scene.scene_id));
+  await show(
+    { kind: "scene", id: scene.scene_id, label },
+    () => api.fetchScene(scene.scene_id),
+    modes,
+    lightModes,
+  );
 }
 
-async function show(next: NonNullable<typeof viewing>, fetch: () => Promise<ArrayBuffer>) {
+/**
+ * `modes` is what each part *is* and goes on screen; `lightModes` is how to
+ * light it. They differ on exactly one case: a mirrored part is its own thing
+ * to the reader and its source's material to the renderer.
+ */
+async function show(
+  next: NonNullable<typeof viewing>,
+  fetch: () => Promise<ArrayBuffer>,
+  modes: PartModes,
+  lightModes: PartModes = modes,
+) {
   const token = ++loadToken;
   showError(null);
   els.hudTitle.textContent = next.label;
@@ -240,7 +299,8 @@ async function show(next: NonNullable<typeof viewing>, fetch: () => Promise<Arra
   try {
     const glb = await fetch();
     if (token !== loadToken) return;
-    const stats = await viewport.load(glb);
+    partModes = modes;
+    const stats = await viewport.load(glb, lightModes);
     if (token !== loadToken) return;
     viewing = next;
     isolated = null;
@@ -269,11 +329,15 @@ function renderLoadedParts(parts: PartInfo[]) {
       const li = document.createElement("li");
       li.className = "loaded-part";
       const name = document.createElement("span");
+      name.className = "lp-name";
       name.textContent = part.name;
       const tris = document.createElement("span");
       tris.className = "detail";
       tris.textContent = `${part.triangles.toLocaleString()} tris`;
-      li.append(name, tris);
+      // Which parts cost a GPU minute and which cost a millisecond is the whole
+      // argument of this project, and it belongs on screen next to the parts.
+      const mode = partModes.get(part.name);
+      li.append(...(mode ? [name, badge(mode), tris] : [name, tris]));
       li.addEventListener("mouseenter", () => viewport.highlight(part.name));
       li.addEventListener("mouseleave", () => viewport.highlight(isolated));
       li.addEventListener("click", () => {
@@ -311,6 +375,203 @@ els.rotate.addEventListener("click", () => {
   const on = els.rotate.classList.toggle("on");
   viewport.setAutoRotate(on);
 });
+
+/* ---------- the plan ---------- */
+
+const MODE_WORD: Record<api.PartMode, string> = {
+  generate: "generated",
+  script: "scripted",
+  mirror: "mirrored",
+};
+
+function badge(mode: api.PartMode): HTMLSpanElement {
+  const el = document.createElement("span");
+  el.className = `badge ${mode}`;
+  el.textContent = MODE_WORD[mode];
+  el.title =
+    mode === "generate"
+      ? "a GPU generation from its own reference image — tens of seconds"
+      : mode === "script"
+        ? "built from primitives.py out of stated dimensions — about a millisecond, no GPU"
+        : "the source part's mesh, reflected — free";
+  return el;
+}
+
+function clearPlan() {
+  rec = null;
+  partModes = new Map();
+  els.planPanel.hidden = true;
+  els.refPanel.hidden = true;
+  els.planStatus.textContent = "";
+  els.planStatus.className = "detail";
+  els.buildStatus.textContent = "";
+  els.buildStatus.className = "detail";
+}
+
+function updatePlanButton() {
+  els.plan.disabled = building || !els.subject.value.trim();
+}
+
+els.subject.addEventListener("input", updatePlanButton);
+els.plan.addEventListener("click", () => void makePlan());
+els.replan.addEventListener("click", () => void makePlan());
+els.build.addEventListener("click", () => void build());
+
+// Enter asks for the plan; Shift+Enter is still a newline.
+for (const field of [els.subject, els.intent]) {
+  field.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      void makePlan();
+    }
+  });
+}
+
+/**
+ * Ask the decision layer what this should be. Free, instant, and no GPU — so
+ * this runs before anything is committed to, which is the entire point: the
+ * criticism this answers is that a build took forty minutes and nobody saw the
+ * price until it had been paid.
+ */
+async function makePlan() {
+  const subject = els.subject.value.trim();
+  if (!subject || building) return;
+  els.plan.disabled = true;
+  els.planStatus.className = "detail";
+  els.planStatus.textContent = "thinking…";
+  try {
+    const next = await api.strategy({ subject, intent: els.intent.value.trim() || undefined });
+    rec = next;
+    els.planStatus.textContent = "";
+    renderPlan(next);
+  } catch (e) {
+    els.planStatus.className = "detail error";
+    els.planStatus.textContent = errText(e);
+  } finally {
+    updatePlanButton();
+  }
+}
+
+/** "8 parts — 1 generated, 6 scripted, 1 mirrored", and never a zero. */
+function partsSentence(c: api.Cost["parts"]): string {
+  if (c.total === 1) return "One part — this is one sculptural whole";
+  const bits = [
+    c.generated ? `${c.generated} generated` : "",
+    c.scripted ? `${c.scripted} scripted` : "",
+    c.mirrored ? `${c.mirrored} mirrored` : "",
+  ].filter(Boolean);
+  return `${c.total} parts — ${bits.join(", ")}`;
+}
+
+function renderPlan(r: api.Recommendation) {
+  els.planPanel.hidden = false;
+  els.planHeadline.textContent = partsSentence(r.cost.parts);
+
+  const budget = r.budget.target_assumed
+    ? `${r.budget.target} assumed`
+    : `for ${r.budget.target}`;
+  els.planSub.textContent =
+    `about ${r.cost.wall_human} · ${r.cost.triangles.total.toLocaleString()} triangles · ` +
+    `${r.cost.estimated_size} · ${budget}`;
+
+  // Why, in the recommender's own words. It cites a measurement for every
+  // claim it makes, and those citations are the reason to trust the answer.
+  const why: HTMLElement[] = [];
+  for (const reason of r.reasoning.slice(0, 2)) {
+    const p = document.createElement("p");
+    p.className = "claim";
+    p.textContent = reason.claim;
+    p.title = `${reason.evidence}\n\n— ${reason.source}`;
+    why.push(p);
+  }
+  // What the scripted and mirrored parts did NOT cost. The most persuasive
+  // line the cost model produces, and it is already written in plain English.
+  for (const saving of r.cost.savings) {
+    const p = document.createElement("p");
+    p.className = "detail saving";
+    p.textContent = saving;
+    why.push(p);
+  }
+  els.planWhy.replaceChildren(...why);
+  els.planWhy.hidden = !why.length;
+
+  renderCeilings(r.warnings);
+  renderPlanParts(r.plan.parts);
+
+  // `single` still needs a reference image, and choosing it is a judgement the
+  // user makes better than any batch score would.
+  const single = r.strategy === "single";
+  els.refPanel.hidden = !single;
+  if (single) {
+    const drafted = r.plan.parts[0]?.prompt;
+    // Only overwrite a prompt the user has not touched — a replan should not
+    // silently discard their wording.
+    if (drafted && (!els.prompt.value.trim() || els.prompt.dataset.drafted === "1")) {
+      els.prompt.value = drafted;
+      els.prompt.dataset.drafted = "1";
+    }
+    els.generateIdeas.disabled = ideasBusy || !els.prompt.value.trim();
+  }
+  updateBuild();
+}
+
+/**
+ * The measured ceilings this plan is about to walk into. Every one cost real
+ * GPU time to discover and every one is invisible until after the money is
+ * spent, so they belong in front of the Build button rather than behind it.
+ */
+function renderCeilings(warnings: api.Ceiling[]) {
+  const shown = warnings.filter((w) => w.severity !== "note");
+  els.planWarnings.hidden = !shown.length;
+  if (!shown.length) return;
+  const title = document.createElement("strong");
+  const blockers = shown.filter((w) => w.severity === "blocker").length;
+  title.textContent = blockers
+    ? `${blockers} known limit${blockers > 1 ? "s" : ""} this walks into`
+    : `${shown.length} thing${shown.length > 1 ? "s" : ""} to know`;
+  const list = document.createElement("ul");
+  list.append(
+    ...shown.map((w) => {
+      const li = document.createElement("li");
+      li.textContent = w.part ? `${w.part}: ${w.message}` : w.message;
+      li.title = `${w.evidence}\n\n— ${w.source}`;
+      return li;
+    }),
+  );
+  els.planWarnings.replaceChildren(title, list);
+}
+
+function renderPlanParts(parts: api.PlanPart[]) {
+  els.planParts.replaceChildren(
+    ...parts.map((part) => {
+      const li = document.createElement("li");
+      li.className = "plan-part";
+      li.id = `plan-part-${part.name}`;
+      const name = document.createElement("span");
+      name.className = "pp-name";
+      name.textContent = part.name.replace(/_/g, " ");
+      const status = document.createElement("span");
+      status.className = "detail pp-status";
+      status.textContent = part.kind ?? "";
+      li.append(name, badge(part.mode), status);
+      if (part.note) li.title = part.note;
+      return li;
+    }),
+  );
+}
+
+function setPartStatus(name: string, text: string, cls = "") {
+  const el = document.getElementById(`plan-part-${name}`)?.querySelector(".pp-status");
+  if (!el) return;
+  el.textContent = text;
+  el.className = `detail pp-status ${cls}`;
+}
+
+function updateBuild() {
+  const needsReference = rec?.strategy === "single" && reference === null;
+  els.build.disabled = !rec || building || needsReference;
+  els.build.textContent = needsReference ? "Pick a reference first" : "Build it";
+}
 
 /* ---------- reference candidates ---------- */
 
@@ -513,7 +774,7 @@ function clearCandidates() {
   els.candidates.classList.remove("picked");
   // A stale pick must not survive into the next batch.
   if (reference?.kind === "candidate") reference = null;
-  updateGenerate();
+  updateBuild();
 }
 
 function pick(imageId: string) {
@@ -526,10 +787,10 @@ function pick(imageId: string) {
   els.imagePreview.removeAttribute("src");
   els.dropLabel.textContent = DROP_LABEL;
   markPicked();
-  updateGenerate();
+  updateBuild();
   // The grid is tall enough to push the next step off the bottom of the column
   // on a short window; having picked, the user is looking for that button.
-  els.generate.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  els.build.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }
 
 function markPicked() {
@@ -599,11 +860,7 @@ els.prompt.addEventListener("keydown", (e) => {
 els.generateIdeas.addEventListener("click", () => void generateIdeas());
 els.regenerate.addEventListener("click", () => void generateIdeas());
 
-/* ---------- submission ---------- */
-
-function updateGenerate() {
-  els.generate.disabled = reference === null || watching !== null;
-}
+/* ---------- building ---------- */
 
 function useImage(file: File) {
   const reader = new FileReader();
@@ -616,7 +873,7 @@ function useImage(file: File) {
     // A dropped file and a picked candidate are the same slot.
     picked = null;
     markPicked();
-    updateGenerate();
+    updateBuild();
   };
   reader.readAsDataURL(file);
 }
@@ -634,8 +891,6 @@ drop.addEventListener("drop", (e) => {
   if (file?.type.startsWith("image/")) useImage(file);
 });
 
-els.generate.addEventListener("click", () => void submit());
-
 /** Part names become glTF node names, so a prompt has to survive as an identifier. */
 function slug(text: string): string | undefined {
   return (
@@ -647,73 +902,211 @@ function slug(text: string): string | undefined {
   );
 }
 
-async function submit() {
-  if (!reference) return;
-  els.generate.disabled = true;
-  els.submitStatus.className = "detail";
-  els.submitStatus.textContent = "submitting…";
+function setBuildStatus(text: string, error = false) {
+  els.buildStatus.className = error ? "detail error" : "detail";
+  els.buildStatus.textContent = text;
+}
 
-  const seed = Number.parseInt(els.seed.value, 10);
-  const faces = Number.parseInt(els.targetFaces.value, 10);
+/** Run the plan the user just looked at — one part or thirty, same button. */
+async function build() {
+  if (!rec || building) return;
+  building = true;
+  updateBuild();
+  updatePlanButton();
+  els.replan.disabled = true;
   try {
-    const job = await api.submitJob({
-      // A picked candidate already lives on the server, so it goes by id — the
-      // same reference can then drive several parts of one object.
-      ...(reference.kind === "candidate"
-        ? { image_id: reference.imageId }
-        : { image_b64: reference.b64 }),
-      part_name:
-        els.partName.value.trim() ||
-        (reference.kind === "candidate" ? slug(reference.prompt) : undefined),
-      seed: Number.isFinite(seed) ? seed : undefined,
-      target_faces: Number.isFinite(faces) ? faces : undefined,
-    });
-    watching = job.id;
-    els.submitStatus.textContent = `queued as ${job.id}`;
-    await refreshJobs();
+    if (rec.strategy === "single") await buildSingle(rec);
+    else await buildMulti(rec);
   } catch (e) {
-    els.submitStatus.className = "detail error";
-    els.submitStatus.textContent = errText(e);
-    updateGenerate();
+    setBuildStatus(errText(e), true);
+  } finally {
+    building = false;
+    els.replan.disabled = false;
+    updateBuild();
+    updatePlanButton();
   }
 }
 
-/** Follows the job submitted from this window until it finishes, then shows it. */
-async function pollWatched() {
-  if (!watching) return;
-  try {
-    const job = await api.getJob(watching);
-    if (job.status === "done") {
-      els.submitStatus.textContent = `${job.id} done in ${job.result?.generation_seconds.toFixed(0)}s`;
-      const id = job.id;
-      watching = null;
-      updateGenerate();
-      await refreshJobs();
-      await selectJob(id);
-    } else if (job.status === "error") {
-      els.submitStatus.className = "detail error";
-      els.submitStatus.textContent = job.error ?? "generation failed";
-      watching = null;
-      updateGenerate();
-    } else {
-      const since = job.started_at ?? job.created_at;
-      const secs = Math.max(0, Math.round(Date.now() / 1000 - since));
-      // Say what the wait is worth up front — a mesh is 30-60s of GPU time and
-      // a silent counter at 25s reads like a hang. Past a minute the honest
-      // answer is different: the first job of a session also loads the weights,
-      // measured at ~85s wall against 40s of actual generation.
-      const hint =
-        job.status !== "running"
-          ? ""
-          : secs < 60
-            ? " · usually 30–60s"
-            : " · the first job also loads the model";
-      els.submitStatus.textContent = `${job.id} ${job.status} · ${secs}s${hint}`;
-    }
-  } catch (e) {
-    els.submitStatus.className = "detail error";
-    els.submitStatus.textContent = errText(e);
+/**
+ * One sculptural whole, one generation. Not a fallback — for a skull it is the
+ * right answer, and splitting one would invent seams that are not there.
+ *
+ * The budget comes off the plan, never off a field: the part's own
+ * `target_faces` if the recommender set one, otherwise the plan's.
+ */
+async function buildSingle(r: api.Recommendation) {
+  if (!reference) return;
+  const part = r.plan.parts[0];
+  const name =
+    slug(part?.name ?? "") ??
+    slug(r.plan.name ?? "") ??
+    (reference.kind === "candidate" ? slug(reference.prompt) : undefined);
+  setBuildStatus("submitting…");
+  setPartStatus(part?.name ?? "", "submitting…");
+
+  const job = await api.submitJob({
+    // A picked candidate already lives on the server, so it goes by id — the
+    // same reference can then drive several parts of one object.
+    ...(reference.kind === "candidate"
+      ? { image_id: reference.imageId }
+      : { image_b64: reference.b64 }),
+    part_name: name,
+    seed: r.plan.seed,
+    target_faces: part?.target_faces ?? r.plan.target_faces,
+    generator: r.plan.generator,
+    textured: r.plan.textured,
+  });
+  watching = job.id;
+  setBuildStatus(`queued as ${job.id}`);
+  await refreshJobs();
+  await waitForJobs([job.id], (state) => {
+    const j = state.get(job.id);
+    if (!j) return;
+    setPartStatus(part?.name ?? "", jobPhrase(j), j.status === "error" ? "error" : "");
+    setBuildStatus(`${jobPhrase(j)}`, j.status === "error");
+  });
+  watching = null;
+  const done = await api.getJob(job.id);
+  if (done.status !== "done") throw new Error(done.error ?? "generation failed");
+  setBuildStatus(`done in ${done.result?.generation_seconds.toFixed(0)}s`);
+  await refreshJobs();
+  await selectJob(job.id);
+}
+
+/**
+ * Many parts. `/decompose` draws every reference image and builds every
+ * scripted part before it answers, then hands back job ids and an `/assemble`
+ * request already written — so the wait after it returns is GPU time on the
+ * generated parts only, and the scripted ones are already finished.
+ */
+async function buildMulti(r: api.Recommendation) {
+  setBuildStatus("drawing references and building the scripted parts…");
+  const result = await api.decompose(r.plan);
+  await refreshJobs();
+
+  for (const p of result.parts) {
+    setPartStatus(
+      p.name,
+      p.status === "error" ? (p.error ?? "failed") : p.status === "queued" ? "queued" : p.status,
+      p.status === "error" ? "error" : "",
+    );
   }
+
+  const generated = result.parts.filter((p) => p.mode === "generate" && p.job_id);
+  const ids = [...new Set(generated.map((p) => p.job_id!))];
+  if (ids.length) {
+    await waitForJobs(ids, (state) => {
+      let finished = 0;
+      for (const p of generated) {
+        const j = state.get(p.job_id!);
+        if (!j) continue;
+        if (j.status === "done" || j.status === "error") finished++;
+        setPartStatus(p.name, jobPhrase(j), j.status === "error" ? "error" : "");
+      }
+      setBuildStatus(`${finished}/${ids.length} generated part(s) finished`);
+    });
+  }
+
+  // A part that failed takes its mesh out of the scene rather than the whole
+  // build: seven good parts and a named failure is something you can finish by
+  // rerolling one prompt.
+  const state = await jobStates(ids);
+  const dead = new Set(ids.filter((id) => state.get(id)?.status !== "done"));
+  const parts = result.assemble_request.filter((p) => !dead.has(p.job_id));
+  // Named, not counted. `result.failed` only knows about parts that fell over
+  // while the plan was being submitted; a generation that failed afterwards
+  // shows up here and nowhere else, and a mirror of it goes with it.
+  const lost = [
+    ...new Set([
+      ...result.failed,
+      ...result.assemble_request.filter((p) => dead.has(p.job_id)).map((p) => p.name),
+    ]),
+  ];
+  if (!parts.length) throw new Error("every part failed; nothing to assemble");
+
+  setBuildStatus(`assembling ${parts.length} part(s)…`);
+  const built = result.parts.filter((p) => p.job_id && !dead.has(p.job_id));
+  const declared: PartModes = new Map(built.map((p) => [p.name, p.mode]));
+  const scene = await api.assemble(parts, r.plan.name ?? slug(r.subject));
+  const [x, y, z] = scene.size;
+  setBuildStatus(
+    // Not metres: a plan with a `scale_reference` makes one unit worth that
+    // part's real length, so the guard tower assembles 1.0 units across and is
+    // eight metres wide. Export is where studs and metres get decided.
+    `${scene.part_count} parts · ${scene.total_faces.toLocaleString()} tris · ` +
+      `${x.toFixed(2)} × ${y.toFixed(2)} × ${z.toFixed(2)}` +
+      (lost.length ? ` · ${lost.length} part(s) dropped: ${lost.join(", ")}` : ""),
+    lost.length > 0,
+  );
+  clearExport();
+  await showScene(scene, declared, modesFor(result));
+}
+
+/**
+ * Which parts of a finished run were generated and which were scripted, keyed
+ * by the node name they will carry in the scene. A mirror is neither: it is the
+ * source part's mesh reflected, so it is lit however its source is.
+ */
+function modesFor(result: api.DecomposeResult): PartModes {
+  const byJob = new Map<string, api.PartMode>();
+  for (const p of result.parts) {
+    if (p.job_id && p.mode !== "mirror") byJob.set(p.job_id, p.mode);
+  }
+  const modes: PartModes = new Map();
+  for (const p of result.parts) {
+    if (!p.job_id) continue;
+    modes.set(p.name, p.mode === "mirror" ? (byJob.get(p.job_id) ?? "script") : p.mode);
+  }
+  return modes;
+}
+
+const jobStates = async (ids: string[]) =>
+  new Map((await Promise.all(ids.map((id) => api.getJob(id)))).map((j) => [j.id, j]));
+
+/**
+ * Waits for a set of jobs, reporting after every sweep.
+ *
+ * The queue is single-worker, so eight generated parts are eight generations
+ * end to end and the honest thing to do is say which one is building rather
+ * than show one bar for all of them.
+ */
+async function waitForJobs(ids: string[], onTick: (state: Map<string, api.Job>) => void) {
+  for (;;) {
+    let state: Map<string, api.Job>;
+    try {
+      state = await jobStates(ids);
+    } catch (e) {
+      setBuildStatus(errText(e), true);
+      await sleep(5000);
+      continue;
+    }
+    onTick(state);
+    if ([...state.values()].every((j) => j.status === "done" || j.status === "error")) return;
+    await refreshJobs();
+    await sleep(2500);
+  }
+}
+
+/** What to say about one job while it is in flight. */
+function jobPhrase(job: api.Job): string {
+  if (job.status === "done") {
+    const r = job.result;
+    return r ? `${r.faces.toLocaleString()} tris · ${r.generation_seconds.toFixed(0)}s` : "done";
+  }
+  if (job.status === "error") return job.error ?? "failed";
+  const since = job.started_at ?? job.created_at;
+  const secs = Math.max(0, Math.round(Date.now() / 1000 - since));
+  // Say what the wait is worth up front — a mesh is 30-60s of GPU time and a
+  // silent counter at 25s reads like a hang. Past a minute the honest answer is
+  // different: the first job of a session also loads the weights, measured at
+  // ~85s wall against 40s of actual generation.
+  const hint =
+    job.status !== "running"
+      ? ""
+      : secs < 60
+        ? " · usually 30–60s"
+        : " · the first job also loads the model";
+  return `${job.status} · ${secs}s${hint}`;
 }
 
 /* ---------- scene builder ---------- */
@@ -920,7 +1313,17 @@ async function doAssemble() {
       `${scene.total_faces.toLocaleString()} faces · ` +
       `${x.toFixed(2)} × ${y.toFixed(2)} × ${z.toFixed(2)}`;
     clearExport();
-    await showScene(scene);
+    // A hand-built scene has no plan behind it, so what built each part comes
+    // off the job record instead — same answer, different source.
+    await showScene(
+      scene,
+      new Map(
+        draft.map((p) => [
+          p.name.trim() || p.jobId,
+          modeOfJob(jobs.find((j) => j.id === p.jobId)),
+        ]),
+      ),
+    );
   } catch (e) {
     els.assembleStatus.className = "detail error";
     els.assembleStatus.textContent = errText(e);
@@ -1058,9 +1461,10 @@ els.refresh.addEventListener("click", () => void refreshJobs());
 // so idle polling stays slow and only tightens while work is in flight.
 let idleTicks = 0;
 setInterval(() => {
+  // A build drives its own polling, so this only keeps the job list honest
+  // about work started elsewhere — an agent through MCP, or another window.
   const busy = watching !== null || jobs.some(isActive);
   if (busy) {
-    void pollWatched();
     void refreshJobs();
     idleTicks = 0;
   } else if (++idleTicks >= 6) {

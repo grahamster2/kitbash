@@ -23,6 +23,11 @@ const WORK_TIMEOUT: Duration = Duration::from_secs(300);
 // request. Four seconds is typical; a rate-limited or retried provider is not,
 // and failing that at the 20s JSON timeout would look like a server fault.
 const IMAGE_TIMEOUT: Duration = Duration::from_secs(180);
+// /decompose generates every reference image inline and builds every scripted
+// part before it answers; only the meshes go onto the queue. That is seconds
+// for a plan with one generation and minutes for one with eight, and the
+// measured bonanza example held the connection for 22 s across ten parts.
+const PLAN_TIMEOUT: Duration = Duration::from_secs(900);
 
 fn client(timeout: Duration) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
@@ -118,6 +123,21 @@ async fn get_job(base_url: String, id: String) -> Result<Value, String> {
 #[tauri::command]
 async fn submit_job(base_url: String, body: Value) -> Result<Value, String> {
     post_json(&base_url, "/jobs", &body, JSON_TIMEOUT).await
+}
+
+/// The decision layer. Subject plus intent prose in, a strategy with its
+/// evidence, its price and a runnable draft plan out — no LLM and no GPU, so
+/// this answers in about a millisecond and the 20s JSON timeout is generous.
+#[tauri::command]
+async fn strategy(base_url: String, body: Value) -> Result<Value, String> {
+    post_json(&base_url, "/strategy", &body, JSON_TIMEOUT).await
+}
+
+/// Runs a plan. Returns once every part is queued or built, with the
+/// `/assemble` request already written — see `PLAN_TIMEOUT`.
+#[tauri::command]
+async fn decompose(base_url: String, body: Value) -> Result<Value, String> {
+    post_json(&base_url, "/decompose", &body, PLAN_TIMEOUT).await
 }
 
 /// Real bounds for a finished part, so placement in the scene builder is
@@ -221,6 +241,8 @@ pub fn run() {
             get_job,
             describe_job,
             submit_job,
+            strategy,
+            decompose,
             assemble,
             export,
             create_candidates,

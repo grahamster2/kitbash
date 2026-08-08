@@ -25,11 +25,44 @@
         </section>
 
         <section class="panel">
-          <h2>New part</h2>
+          <h2>What do you want?</h2>
 
           <label class="field">
+            <span>The thing</span>
+            <textarea id="subject" rows="2" spellcheck="false"
+              placeholder="a medieval stone guard tower"></textarea>
+          </label>
+          <label class="field">
+            <span>What it's for</span>
+            <textarea id="intent" rows="2" spellcheck="false"
+              placeholder="a Roblox game · a close-up hero prop · background scenery · a Blender render"></textarea>
+          </label>
+          <button id="plan" type="button" disabled>Plan it</button>
+          <p id="plan-status" class="detail"></p>
+        </section>
+
+        <section class="panel" id="plan-panel" hidden>
+          <h2>
+            The plan
+            <button id="replan" class="ghost" type="button" title="Ask again">Rethink</button>
+          </h2>
+          <p id="plan-headline" class="headline"></p>
+          <p id="plan-sub" class="detail"></p>
+          <div id="plan-why" class="why" hidden></div>
+          <div id="plan-warnings" class="warnbox" hidden></div>
+          <ul id="plan-parts" class="plan-parts"></ul>
+          <button id="build" type="button">Build it</button>
+          <p id="build-status" class="detail"></p>
+        </section>
+
+        <section class="panel" id="ref-panel" hidden>
+          <h2>Reference</h2>
+          <p class="detail">
+            One sculptural whole, so one generation — pick the image it gets built from.
+          </p>
+          <label class="field">
             <span>Prompt</span>
-            <textarea id="prompt" rows="2" spellcheck="false"
+            <textarea id="prompt" rows="3" spellcheck="false"
               placeholder="a weathered wooden crate"></textarea>
           </label>
           <button id="generate-ideas" type="button" disabled>Generate 4 ideas</button>
@@ -46,22 +79,6 @@
             <img id="image-preview" alt="" hidden />
             <span id="drop-label">…or drop a reference image</span>
           </label>
-          <div class="grid-2">
-            <label class="field">
-              <span>Part name</span>
-              <input id="part-name" type="text" placeholder="fuselage" />
-            </label>
-            <label class="field">
-              <span>Seed</span>
-              <input id="seed" type="number" placeholder="random" />
-            </label>
-          </div>
-          <label class="field">
-            <span>Target faces</span>
-            <input id="target-faces" type="number" value="8000" min="500" step="500" />
-          </label>
-          <button id="generate" type="button" disabled>Generate model</button>
-          <p id="submit-status" class="detail"></p>
         </section>
 
         <section class="panel grow">
@@ -141,7 +158,7 @@
           </div>
           <button id="export" type="button" disabled>Export</button>
           <p id="export-status" class="detail"></p>
-          <div id="export-warnings" hidden></div>
+          <div id="export-warnings" class="warnbox" hidden></div>
           <ul id="export-files" hidden></ul>
         </section>
       </aside>

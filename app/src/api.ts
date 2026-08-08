@@ -118,6 +118,14 @@ export interface ScenePart {
   use_raw?: boolean;
 }
 
+/**
+ * What `/decompose` hands back ready to post. It carries more than a hand-built
+ * `ScenePart` — anchors, mirrors, materials and colours the plan already stated
+ * — and `assemble.py` owns what those keys mean, so this passes through opaque
+ * rather than being retyped here and drifting.
+ */
+export type AssemblePart = ScenePart & Record<string, unknown>;
+
 export interface Scene {
   scene_id: string;
   scene_path: string;
@@ -128,6 +136,101 @@ export interface Scene {
   bounds_max: Vec3;
   size: Vec3;
   file_bytes: number;
+}
+
+/* ---------- the decision layer ---------- */
+
+/** `generate` costs a GPU minute, `script` costs milliseconds, `mirror` is free. */
+export type PartMode = "generate" | "script" | "mirror";
+
+/**
+ * One part of a decompose plan. Deliberately loose: the plan is written by the
+ * server (or by a coding agent through MCP) and is posted back to `/decompose`
+ * unchanged, so nothing here may narrow what survives the round trip.
+ */
+export interface PlanPart extends Record<string, unknown> {
+  name: string;
+  mode: PartMode;
+  kind?: string;
+  prompt?: string;
+  target_faces?: number;
+  note?: string;
+}
+
+export interface Plan extends Record<string, unknown> {
+  name?: string;
+  subject: string;
+  seed?: number;
+  generator?: string;
+  target_faces?: number;
+  textured?: boolean;
+  parts: PlanPart[];
+}
+
+export interface Reason {
+  saw: string;
+  argues_for: string;
+  claim: string;
+  evidence: string;
+  source: string;
+}
+
+export interface Ceiling {
+  code: string;
+  severity: "blocker" | "warning" | "note";
+  message: string;
+  evidence: string;
+  source: string;
+  part: string | null;
+}
+
+export interface Cost {
+  wall_human: string;
+  gpu_seconds: { low: number; likely: number; high: number };
+  generations: number;
+  estimated_size: string;
+  parts: { total: number; generated: number; scripted: number; mirrored: number };
+  triangles: { total: number; largest_part: number };
+  savings: string[];
+}
+
+/** `POST /strategy` — a recommendation, its evidence, its price, and a draft plan. */
+export interface Recommendation {
+  subject: string;
+  strategy: "single" | "hybrid" | "scripted";
+  family: string;
+  headline: string;
+  confidence: { level: string; why: string };
+  reasoning: Reason[];
+  warnings: Ceiling[];
+  plan_warnings: string[];
+  cost: Cost;
+  plan: Plan;
+  draft_disclaimer: string;
+  budget: { target: string; target_assumed: boolean; faces_per_part: number };
+}
+
+/** One part of a running build, as `/decompose` reports it. */
+export interface PartRecord {
+  name: string;
+  mode: PartMode;
+  job_id: string | null;
+  image_id: string | null;
+  prompt: string | null;
+  status: string;
+  error: string | null;
+  faces?: number;
+  note?: string | null;
+}
+
+export interface DecomposeResult {
+  subject: string;
+  parts: PartRecord[];
+  job_ids: string[];
+  failed: string[];
+  warnings: string[];
+  elapsed_seconds: number;
+  assemble_request: AssemblePart[];
 }
 
 export interface ExportBody {
@@ -198,7 +301,19 @@ export const createImage = (body: {
   remove_background: boolean;
 }) => invoke<SingleImage>("create_image", { baseUrl, body });
 
-export const assemble = (parts: ScenePart[], sceneName?: string) =>
+/**
+ * The decision in front of everything else. No LLM and no GPU: it reads the
+ * subject and the intent prose, and answers in about a millisecond with what it
+ * would build, what that costs, and a draft plan that validates.
+ */
+export const strategy = (body: { subject: string; intent?: string }) =>
+  invoke<Recommendation>("strategy", { baseUrl, body });
+
+/** Executes a plan: images inline, meshes queued, ids and an /assemble request back. */
+export const decompose = (plan: Plan) =>
+  invoke<DecomposeResult>("decompose", { baseUrl, body: plan });
+
+export const assemble = (parts: AssemblePart[], sceneName?: string) =>
   invoke<Scene>("assemble", { baseUrl, body: { parts, scene_name: sceneName } });
 
 export const exportScene = (body: ExportBody) =>

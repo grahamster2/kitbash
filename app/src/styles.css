@@ -221,6 +221,126 @@ button.ghost.on {
   border-color: rgba(248, 113, 113, 0.35);
 }
 
+/* ---------- the plan ---------- */
+
+/* The one line the whole panel exists to deliver: how many parts, and how many
+   of them cost GPU time. It is a sentence, not a stat, so it reads as one. */
+.headline {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.why {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-left: 9px;
+  border-left: 2px solid var(--line);
+}
+
+.claim {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.saving {
+  color: var(--ok);
+  opacity: 0.85;
+}
+
+.plan-parts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.plan-part {
+  display: grid;
+  /* Name, badge, status — the badge column is fixed so the modes line up into
+     a column you can read down, which is the point of showing them. */
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: 2px 8px;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: var(--panel-2);
+  font-size: 12px;
+}
+
+.pp-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pp-status {
+  grid-column: 1 / -1;
+  font-size: 11px;
+}
+
+.pp-status.error {
+  color: var(--err);
+}
+
+/* Generated, scripted or mirrored. A GPU minute, a millisecond, or nothing —
+   the distinction this project is about, so it is on screen beside every part. */
+.badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.badge.generate {
+  color: var(--accent);
+  border-color: rgba(110, 168, 254, 0.4);
+}
+
+.badge.script {
+  color: var(--ok);
+  border-color: rgba(74, 222, 128, 0.35);
+}
+
+.badge.mirror {
+  color: var(--warn);
+  border-color: rgba(251, 191, 36, 0.35);
+}
+
+/* ---------- warnings ---------- */
+
+/* The measured ceilings, and the export warnings, share one look: this is how
+   the user finds out what the build is about to run into. */
+.warnbox {
+  padding: 8px 10px;
+  border: 1px solid rgba(251, 191, 36, 0.4);
+  border-radius: 6px;
+  background: rgba(60, 44, 10, 0.5);
+  color: var(--warn);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.warnbox ul {
+  margin: 4px 0 0;
+  padding-left: 16px;
+}
+
 /* ---------- candidates ---------- */
 
 .ideas-head {
@@ -599,8 +719,8 @@ button.ghost.on {
 }
 
 .loaded-part {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: 1fr auto auto;
   align-items: baseline;
   gap: 8px;
   padding: 4px 8px;
@@ -620,22 +740,13 @@ button.ghost.on {
   color: var(--accent);
 }
 
+.lp-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---------- export ---------- */
-
-#export-warnings {
-  padding: 8px 10px;
-  border: 1px solid rgba(251, 191, 36, 0.4);
-  border-radius: 6px;
-  background: rgba(60, 44, 10, 0.5);
-  color: var(--warn);
-  font-size: 11.5px;
-  line-height: 1.45;
-}
-
-#export-warnings ul {
-  margin: 4px 0 0;
-  padding-left: 16px;
-}
 
 #export-files {
   list-style: none;

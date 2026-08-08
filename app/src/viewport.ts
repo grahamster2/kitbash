@@ -1,10 +1,25 @@
 /**
  * three.js viewport for a generated part or an assembled multi-part scene.
  *
- * Meshes off the generator are untextured and often not watertight, so the
- * setup is tuned for reading *shape*: an environment map for form, a key light
- * for edges, double-sided materials so holes don't turn into black voids, and a
- * grid to anchor scale.
+ * Two kinds of surface arrive here and they must not be lit the same way.
+ *
+ * A **generated** part carries a back-projected albedo, and that albedo *is the
+ * reference photograph* — it already contains the light and shadow the photo
+ * was taken under. Shading it again double-counts: it blew the gallery assets
+ * to white and rendered the same meshes near-black through the preview
+ * endpoint, and four of the best assets in the ten-subject set were nearly
+ * written off because of it. So a mapped generated part renders unlit, exactly
+ * as `gallery_src.js` does.
+ *
+ * A **scripted** part is the opposite case. Its colour is a PBR factor, or a
+ * procedural tiling texture with no light baked in at all, and without shading
+ * a wall and the floor it meets are one flat silhouette. Those get lit.
+ *
+ * Both need `DoubleSide`: generated shells are open and not watertight, and
+ * winding is inconsistent across the two generators, so backface culling reads
+ * as missing geometry. Meshes also arrive with `POSITION` and at most
+ * `TEXCOORD_0` — there is **no NORMAL attribute anywhere** — so anything lit
+ * has to be flat-shaded off screen-space derivatives.
  */
 import {
   ACESFilmicToneMapping,
@@ -15,7 +30,9 @@ import {
   DoubleSide,
   GridHelper,
   Group,
+  Material,
   Mesh,
+  MeshBasicMaterial,
   MeshStandardMaterial,
   Object3D,
   PMREMGenerator,
@@ -23,6 +40,7 @@ import {
   Scene,
   SRGBColorSpace,
   Sphere,
+  Texture,
   Vector3,
   WebGLRenderer,
 } from "three";
@@ -41,6 +59,14 @@ export interface MeshStats {
   /** One entry per named top-level node — for an assembled scene, per part. */
   parts: PartInfo[];
 }
+
+/**
+ * How each named part was built, when the caller knows. `generate` is the only
+ * value that changes anything: it is what marks an albedo as photographic.
+ * Without it the material's own name is the fallback tell — `texturing.py`
+ * stamps `kitbash_backprojected`, `materials.py` stamps `kitbash_<family>`.
+ */
+export type PartModes = Map<string, "generate" | "script" | "mirror">;
 
 // Assembled scenes arrive with the server's own material, single parts with a
 // substituted grey, so a coloured tint would read differently per file and a
@@ -63,7 +89,7 @@ export class Viewport {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.outputColorSpace = SRGBColorSpace;
     this.renderer.toneMapping = ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 0.95;
+    this.renderer.toneMappingExposure = 0.9;
     container.appendChild(this.renderer.domElement);
 
     this.scene.background = new Color(0x14161a);
@@ -73,13 +99,20 @@ export class Viewport {
     const pmrem = new PMREMGenerator(this.renderer);
     this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
 
-    const key = new DirectionalLight(0xffffff, 1.5);
+    // Wound back from the rig this had when every mesh arrived untextured and
+    // a substituted mid-grey needed all the light it could get. Scripted parts
+    // now carry their own albedo — measured at 0.72 mean sRGB on the stone
+    // family — and headroom above it is worth more than brightness: at the old
+    // intensities a stone wall renders at 217 of 255 and its surface relief is
+    // the first thing to go. Enough key remains for the faces of a box to read
+    // apart, which is the whole job of the lit path.
+    const key = new DirectionalLight(0xffffff, 1.1);
     key.position.set(3, 5, 4);
     this.scene.add(key);
-    const rim = new DirectionalLight(0x88aaff, 0.7);
+    const rim = new DirectionalLight(0x88aaff, 0.4);
     rim.position.set(-4, 2, -3);
     this.scene.add(rim);
-    this.scene.add(new AmbientLight(0xffffff, 0.15));
+    this.scene.add(new AmbientLight(0xffffff, 0.12));
 
     this.grid = new GridHelper(2, 20, 0x4a5568, 0x2a2f38);
     this.scene.add(this.grid);
@@ -110,43 +143,40 @@ export class Viewport {
   clear() {
     if (!this.current) return;
     this.scene.remove(this.current);
+    // A texture is shared by every material built from the same glTF image, so
+    // it is disposed once by identity rather than once per material.
+    const maps = new Set<Texture>();
     this.current.traverse((o) => {
       if (o instanceof Mesh) {
         o.geometry.dispose();
         const mats = Array.isArray(o.material) ? o.material : [o.material];
-        mats.forEach((m) => m.dispose());
+        for (const m of mats) {
+          const map = (m as MeshBasicMaterial).map;
+          if (map) maps.add(map);
+          m.dispose();
+        }
       }
     });
+    for (const map of maps) map.dispose();
     this.current = null;
     this.parts.clear();
   }
 
-  /** Parses GLB bytes and swaps them in as the only visible model. */
-  async load(glb: ArrayBuffer): Promise<MeshStats> {
+  /**
+   * Parses GLB bytes and swaps them in as the only visible model.
+   *
+   * `modes` says how each named part was built. It is what decides whether a
+   * part's albedo is a photograph to be shown as-is or a material to be lit;
+   * see the module header. Omit it and each material's own name is used
+   * instead, which is right for a single job straight off the generator and a
+   * guess for anything assembled elsewhere.
+   */
+  async load(glb: ArrayBuffer, modes?: PartModes): Promise<MeshStats> {
     const gltf = await this.loader.parseAsync(glb, "");
     this.clear();
 
     const root = gltf.scene;
     let triangles = 0;
-    root.traverse((o) => {
-      if (!(o instanceof Mesh)) return;
-      const geo = o.geometry;
-      triangles += (geo.index ? geo.index.count : geo.attributes.position.count) / 3;
-      // An assembled scene carries no glTF materials, so GLTFLoader hands every
-      // part the same cached default. Clone before touching it or tinting one
-      // part tints all of them.
-      const mat = (o.material as MeshStandardMaterial).clone();
-      o.material = mat;
-      // Generated shells are frequently open; single-sided rendering reads as
-      // missing geometry rather than as a hole.
-      mat.side = DoubleSide;
-      // Shape-only meshes export as pure white, which blows out under IBL and
-      // hides exactly the surface detail you are trying to judge.
-      if (!mat.map && mat.color.getHex() === 0xffffff) mat.color.setHex(0x8d95a5);
-      mat.roughness = Math.min(mat.roughness ?? 1, 0.6);
-      mat.metalness = 0;
-      mat.envMapIntensity = 0.9;
-    });
 
     // assemble.py writes one named top-level node per part; that node name is
     // the handle the rest of the pipeline (and Roblox) uses for the part.
@@ -164,6 +194,26 @@ export class Viewport {
       parts.push({ name: child.name, triangles: Math.round(tris) });
     }
 
+    // Walk per part rather than over the whole tree, so each mesh is shaded
+    // according to how *its* part was built.
+    const shade = (node: Object3D, mode: string | undefined) => {
+      node.traverse((o) => {
+        if (!(o instanceof Mesh)) return;
+        const geo = o.geometry;
+        triangles += (geo.index ? geo.index.count : geo.attributes.position.count) / 3;
+        o.material = this.materialFor(o.material as Material, geo.attributes.normal !== undefined, mode);
+      });
+    };
+    // A single job's mesh is one node the server named `geometry_0`, not the
+    // part name the caller knows it by, so one mode against one part is taken
+    // to be about that part whatever either is called.
+    const only =
+      this.parts.size === 1 && modes?.size === 1 ? [...modes.values()][0] : undefined;
+    for (const [name, node] of this.parts) shade(node, modes?.get(name) ?? only);
+    // Anything not under a named top-level node — an unnamed single mesh —
+    // still has to be shaded, and has only its material name to go on.
+    for (const child of root.children) if (!this.parts.has(child.name)) shade(child, undefined);
+
     const box = new Box3().setFromObject(root);
     const size = box.getSize(new Vector3());
     const center = box.getCenter(new Vector3());
@@ -180,9 +230,59 @@ export class Viewport {
     return { triangles: Math.round(triangles), size: [size.x, size.y, size.z], parts };
   }
 
+  /**
+   * The one decision this file exists to get right.
+   *
+   * A photographic albedo is shown unlit — no lights, no tone mapping, the
+   * pixels the camera actually recorded. Everything else is lit, flat-shaded
+   * when the mesh brought no normals, so its form reads at all.
+   */
+  private materialFor(source: Material, hasNormals: boolean, mode?: string): Material {
+    const src = source as MeshStandardMaterial;
+    const map = src.map ?? null;
+    // GLTFLoader gets this right for a baseColorTexture; setting it again costs
+    // nothing and covers a map that arrived any other way. Without it the
+    // albedo renders washed out — the classic sRGB-as-linear mistake.
+    if (map) map.colorSpace = SRGBColorSpace;
+
+    const photographic =
+      map !== null &&
+      (mode === "generate" ||
+        // Standing alone, a mesh's material name is the tell: texturing.py
+        // stamps `kitbash_backprojected`. Inside an assembled scene it is not —
+        // materials.py keeps the albedo but renames the material to its family
+        // — which is why `modes` exists.
+        (mode === undefined && /backproject/i.test(src.name)));
+
+    if (photographic) {
+      return new MeshBasicMaterial({ map, side: DoubleSide, toneMapped: false });
+    }
+
+    const mat = new MeshStandardMaterial({
+      map,
+      color: src.color ? src.color.clone() : new Color(0xffffff),
+      side: DoubleSide,
+      // No mesh from either generator or from primitives.py carries a NORMAL
+      // attribute, so without this every lit surface samples a zero normal and
+      // the part renders black.
+      flatShading: !hasNormals,
+      roughness: Math.min(src.roughness ?? 1, 0.9),
+      metalness: src.metalness ?? 0,
+      envMapIntensity: 0.6,
+    });
+    // Shape-only meshes export as pure white, which blows out under IBL and
+    // hides exactly the surface detail you are trying to judge.
+    if (!map && mat.color.getHex() === 0xffffff) mat.color.setHex(0x8d95a5);
+    return mat;
+  }
+
   /** Hides every other part and reframes on this one; `null` restores all. */
   isolate(name: string | null) {
     if (name !== null && !this.parts.has(name)) return;
+    // Box3 updates only the node's own matrix, not its ancestors', so without
+    // this an isolate called before the first render frames the part where it
+    // sat *before* load() recentred the model.
+    this.current?.updateMatrixWorld(true);
     for (const [key, node] of this.parts) node.visible = name === null || key === name;
     if (!this.current) return;
     const node = name === null ? this.current : this.parts.get(name)!;
@@ -196,8 +296,14 @@ export class Viewport {
       const on = key === name;
       node.traverse((o) => {
         if (!(o instanceof Mesh)) return;
-        const mat = o.material as MeshStandardMaterial;
-        mat.emissive.setScalar(on ? HIGHLIGHT_LIFT : 0);
+        const mat = o.material as Material;
+        if (mat instanceof MeshStandardMaterial) {
+          mat.emissive.setScalar(on ? HIGHLIGHT_LIFT : 0);
+        } else if (mat instanceof MeshBasicMaterial) {
+          // An unlit part has no emissive channel. Its colour is a multiplier
+          // over the albedo, so pushing it past white brightens the picture.
+          mat.color.setScalar(on ? 1 + HIGHLIGHT_LIFT : 1);
+        }
       });
     }
   }
@@ -233,7 +339,7 @@ export class Viewport {
     this.current?.traverse((o) => {
       if (o instanceof Mesh) {
         const mats = Array.isArray(o.material) ? o.material : [o.material];
-        mats.forEach((m) => ((m as MeshStandardMaterial).wireframe = on));
+        mats.forEach((m) => ((m as MeshStandardMaterial | MeshBasicMaterial).wireframe = on));
       }
     });
   }
